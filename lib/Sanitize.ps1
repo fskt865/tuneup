@@ -89,7 +89,18 @@ $script:RedactionPatterns = @(
     @{ Pattern = '(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}';                       Token = '<EMAIL>' },
     @{ Pattern = '(?i)\b[a-z]:\\Users\\[^\\/:*?"<>|\r\n]+';                          Token = '<USERPROFILE>' },
     @{ Pattern = '\b[A-Z0-9]{5}(?:-[A-Z0-9]{5}){4}\b';                              Token = '<PRODUCT_KEY>' },
-    @{ Pattern = '(?i)\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b';             Token = '<GUID>' }
+    @{ Pattern = '(?i)\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b';             Token = '<GUID>' },
+
+    # Account SIDs. S-1-5-21-... is unique to a machine or domain and names a
+    # specific user - it turned up embedded in a scheduled task name, which is
+    # exactly the kind of place identifying data hides. S-1-12-1-... is the
+    # Azure AD equivalent.
+    #
+    # Well-known SIDs (S-1-5-18 LocalSystem, S-1-5-32-544 Administrators) are
+    # deliberately NOT matched: they are identical on every Windows machine,
+    # so they identify nobody and are worth keeping for diagnosis.
+    @{ Pattern = '(?i)\bS-1-5-21(?:-\d+)+';                                          Token = '<SID>' },
+    @{ Pattern = '(?i)\bS-1-12-1(?:-\d+)+';                                          Token = '<SID>' }
 )
 
 function Protect-String {

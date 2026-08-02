@@ -68,7 +68,13 @@ $cases = @(
     @{ Name = 'Email';         In = 'Account owner.name@example.com sync'; Bad = 'owner.name@example.com' },
     @{ Name = 'User path';     In = 'Failed C:\Users\Margaret\Documents';  Bad = 'C:\Users\Margaret' },
     @{ Name = 'Product key';   In = 'Key ABCDE-FGHIJ-KLMNO-PQRST-UVWXY';   Bad = 'ABCDE-FGHIJ-KLMNO-PQRST-UVWXY' },
-    @{ Name = 'GUID';          In = 'Id 3f2504e0-4f89-11d3-9a0c-0305e82c3301'; Bad = '3f2504e0-4f89-11d3-9a0c-0305e82c3301' }
+    @{ Name = 'GUID';          In = 'Id 3f2504e0-4f89-11d3-9a0c-0305e82c3301'; Bad = '3f2504e0-4f89-11d3-9a0c-0305e82c3301' },
+    @{ Name = 'Account SID';   In = 'Task OneDrive Startup Task-S-1-5-21-515117657-1038125042-334280290-1001';
+        Bad = 'S-1-5-21-515117657-1038125042-334280290-1001'
+    },
+    @{ Name = 'Azure AD SID';  In = 'User S-1-12-1-1234567890-1234567890-1234567890-1234567890';
+        Bad = 'S-1-12-1-1234567890'
+    }
 )
 foreach ($c in $cases) {
     $out = Protect-String -Text $c.In
@@ -100,6 +106,11 @@ Assert-True 'Verifier flags unsanitized text' (-not $verdictDirty.Clean)
 
 $verdictClean = Test-SanitizedText -Text (Protect-String -Text $dirty)
 Assert-True 'Verifier passes sanitized text' ($verdictClean.Clean) ("hits=" + ($verdictClean.Hits -join ','))
+
+# Well-known SIDs are the same on every Windows machine, so they identify
+# nobody. Redacting them would throw away diagnostic value for no privacy gain.
+$wellKnown = Protect-String -Text 'Ran as S-1-5-18 in group S-1-5-32-544'
+Assert-True 'Well-known SIDs are NOT redacted' ($wellKnown -match 'S-1-5-18' -and $wellKnown -match 'S-1-5-32-544') "got=$wellKnown"
 
 Write-Host ''
 Write-Host ("  {0} passed, {1} failed" -f $pass, $fail) -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })

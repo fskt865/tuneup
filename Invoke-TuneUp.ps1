@@ -21,6 +21,9 @@ param(
     [switch]$IncludeOptional,
     [switch]$Provisioned,
 
+    # Undo: re-enable everything the startup module disabled on this machine.
+    [switch]$Restore,
+
     [switch]$IncludeDrivers,
     [switch]$IncludeComponentCleanup,
     [string]$SourcePath,
@@ -107,6 +110,16 @@ function Write-SanitizedReport {
 
     $clean = Protect-Object -InputObject $Report
     $json = $clean | ConvertTo-Json -Depth 14
+
+    # PowerShell 5.1 escapes < and > as < / >, which turns every
+    # redaction token into <SID> in the file a tech actually opens.
+    # Both forms are valid JSON; restore the readable one. Done BEFORE
+    # verification so the check runs on exactly the bytes that get written.
+    # The backslash is built from its char code rather than written literally,
+    # so no editor or transport can quietly decode the sequence and turn these
+    # into no-op replaces.
+    $bs = [string][char]0x5C
+    $json = $json.Replace(($bs + 'u003c'), '<').Replace(($bs + 'u003e'), '>').Replace(($bs + 'u0027'), "'")
 
     $verify = Test-SanitizedText -Text $json
     if (-not $verify.Clean) {
@@ -300,6 +313,7 @@ function Invoke-Action {
             $opts = @{
                 IncludeOptional = [bool]$IncludeOptional
                 Provisioned     = [bool]$Provisioned
+                Restore         = [bool]$Restore
             }
             $results.ModuleResult = Invoke-TuneUpModuleByInfo -ModuleInfo $info -Apply:$Apply -Options $opts
             $results.Report = Get-TuneUpReport -SkipEventLogs:$SkipEventLogs

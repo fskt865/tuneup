@@ -4,7 +4,7 @@
 $ErrorActionPreference = 'Continue'
 $here = $PSScriptRoot
 
-$suites = @('Test-Sanitizer.ps1', 'Test-Modules.ps1', 'Test-BrowserHijack.ps1')
+$suites = @('Test-Sanitizer.ps1', 'Test-Modules.ps1', 'Test-BrowserHijack.ps1', 'Test-Startup.ps1')
 $failed = @()
 
 foreach ($s in $suites) {

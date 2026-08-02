@@ -30,7 +30,10 @@ Two passes. Literals gathered from the live machine (hostname, every local
 profile name, BIOS/board/system/disk serials, SMBIOS UUID, MachineGuid) go
 first, longest-first so a short name cannot chew a hole in a longer one.
 Literals under 4 characters are skipped entirely. Then a regex sweep for
-MAC, IPv4, email, `C:\Users\<name>` paths, product keys, and GUIDs.
+MAC, IPv4, email, `C:\Users\<name>` paths, product keys, GUIDs, and account
+SIDs (`S-1-5-21-...`, `S-1-12-1-...`). Well-known SIDs like `S-1-5-18` are
+deliberately kept — they are identical on every Windows machine, so they
+identify nobody and are worth having for diagnosis.
 
 Volume labels are never collected - a label is free text and is very often the
 owner's name. Event log **message bodies** are never collected, only IDs,
@@ -62,6 +65,7 @@ letter is not the one you had last time.
 
 Modules (type the key):
    bloatware   Bloatware inventory and removal
+   startup     Startup item inventory and control
    browser     Browser hijack and redirect detection
 ```
 
@@ -78,6 +82,9 @@ Non-interactive:
 .\Invoke-TuneUp.ps1 -Module bloatware                        # inventory only
 .\Invoke-TuneUp.ps1 -Module bloatware -Apply                 # remove Consumer tier
 .\Invoke-TuneUp.ps1 -Module bloatware -Apply -IncludeOptional -Provisioned
+.\Invoke-TuneUp.ps1 -Module startup                          # inventory only
+.\Invoke-TuneUp.ps1 -Module startup -Apply                   # disable Optional tier
+.\Invoke-TuneUp.ps1 -Module startup -Apply -Restore          # undo all of the above
 .\Invoke-TuneUp.ps1 -Module browser                          # detect only
 .\Invoke-TuneUp.ps1 -Module browser -Apply -WhatIf           # show the fix plan
 ```
@@ -173,6 +180,38 @@ a console. Same rule as partitioning: print the command, let the tech decide.
 `-Provisioned` also removes the provisioned copy, without which every new user
 profile gets the junk back.
 
+### startup
+
+**Disables, never deletes.** It writes to the same `StartupApproved` keys Task
+Manager uses, so the original `Run` value and its command line stay intact and
+the customer can re-enable anything themselves from Task Manager > Startup.
+Deleting a `Run` entry throws away the command line, and reconstructing one
+from memory on a machine you no longer have is not a repair.
+
+Covers `HKLM`/`HKCU` `Run` (both bitnesses) and both Startup folders, showing
+current enabled/disabled state. Same tiering as bloatware — Protected,
+Optional, Unclassified — with an important asymmetry:
+
+> Protected patterns may be **broad**: over-matching just means declining to
+> disable something. Optional patterns must be **specific**: over-matching
+> means disabling something the machine needed.
+
+Touchpad, audio, graphics, Fn-key, OEM and security entries are Protected.
+Only the Optional tier is ever switched off, and `-Restore` re-enables
+everything the tool disabled from a backup written at the time.
+
+Boot impact comes from Windows' own diagnostics log (
+`Microsoft-Windows-Diagnostics-Performance/Operational`, events 100/101/103) —
+real measured seconds, not a guess. That log **needs elevation**; unelevated
+runs report `RequiresElevation` rather than implying boot is fine.
+
+Logon-triggered scheduled tasks are **reported, never disabled** — that is
+where updaters hide, but also where OEM and Windows machinery lives. The
+module prints the `Disable-ScheduledTask` command instead. They are classified
+on task path *and* name, so `Background monitor` under `\Lenovo\Power Manager\`
+reads as Protected rather than inviting someone to switch off the battery
+manager.
+
 ### browser
 
 Detection is broad, repair is deliberately narrow.
@@ -248,11 +287,13 @@ tasks\Repair-ComponentStore.ps1  DISM ladder + SFC
 tasks\Invoke-WindowsUpdate.ps1   WU via COM agent
 tasks\Clear-TempFiles.ps1        cache reclamation
 modules\Remove-Bloatware.ps1     tiered app classification and removal
+modules\Manage-StartupItems.ps1  startup inventory, reversible disable
 modules\Repair-BrowserHijack.ps1 redirect detection, narrow repair
 tests\Run-AllTests.ps1           runs every suite
 tests\Test-Sanitizer.ps1         redaction
 tests\Test-Modules.ps1           discovery + bloatware classification
 tests\Test-BrowserHijack.ps1     shortcut detection and repair
+tests\Test-Startup.ps1           StartupApproved encoding + classification
 ```
 
 ---
@@ -260,19 +301,24 @@ tests\Test-BrowserHijack.ps1     shortcut detection and repair
 ## Testing status
 
 Run everything with `tests\Run-AllTests.ps1`. Verified on Windows 11 24H2
-(26100), PowerShell 5.1 — 83 assertions across three suites, all passing:
+(26100), PowerShell 5.1 — 130 assertions across four suites, all passing:
 
-- **Sanitizer (21):** live hostname/account/profile-path redaction, synthetic
-  MAC/IPv4/email/user-path/product-key/GUID, nested object graphs, and a
-  verifier that must flag unsanitized text. Plus an independent leak check of
-  a generated report against this machine's real serials.
-- **Modules (41):** discovery, manifest validation, unique keys, and 28
+- **Sanitizer (24):** live hostname/account/profile-path redaction, synthetic
+  MAC/IPv4/email/user-path/product-key/GUID/SID, nested object graphs, a
+  verifier that must flag unsanitized text, and a check that well-known SIDs
+  are *not* redacted. Plus an independent leak check of a generated report
+  against this machine's real serials.
+- **Modules (44):** discovery, manifest validation, unique keys, and 28
   classification cases covering runtimes, OEM utilities, antivirus, consumer
   junk and unknowns — plus a live sweep asserting no System-signed package on
   this machine is removal-eligible.
 - **Browser (21):** argument splitting, synthetic hijacked shortcut detected
   and repaired, legitimate switches preserved, query string never recorded,
   backup written before the fix, clean and non-browser shortcuts untouched.
+- **Startup (41):** `StartupApproved` byte encoding both directions including
+  the 0x06/0x07 variant and the missing-value case, 24 classification cases,
+  and an enable/disable round trip against a throwaway registry key so a
+  failing test can never leave a real startup item switched off.
 
 Also verified by hand: `Report` collection and write, `-WhatIf` dry run of the
 full ladder (plan printed, no report written, log still written), unelevated
@@ -280,9 +326,10 @@ degradation, and execution from the stick.
 
 **Not yet exercised end-to-end:** the elevated write paths — actual
 `RestoreHealth`, `sfc /scannow`, update installation, cache deletion, real
-`Remove-AppxPackage`, and the proxy-registry fix. Their dry-run and refusal
-paths are tested; the halves that change a machine are not. Those need a bench
-run before you trust them on a customer's hardware.
+`Remove-AppxPackage`, the proxy-registry fix, and a real startup
+disable/restore cycle against live `StartupApproved` keys. Their dry-run and
+refusal paths are tested; the halves that change a machine are not. Those need
+a bench run before you trust them on a customer's hardware.
 
 Detection on a clean machine proves the detectors run, not that they detect.
 The shortcut path is covered by synthetic fixtures; the proxy, policy,

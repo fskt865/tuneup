@@ -27,7 +27,7 @@ Write-Host '  ----------------' -ForegroundColor DarkGray
 $mods = Get-TuneUpModules -ModuleRoot (Join-Path $Root 'modules')
 Assert-True 'Discovers at least two modules' (@($mods).Count -ge 2) ("count=" + @($mods).Count)
 
-foreach ($key in @('bloatware', 'browser', 'startup', 'driver', 'stress')) {
+foreach ($key in @('bloatware', 'browser', 'startup', 'driver', 'stress', 'network')) {
     $m = @($mods | Where-Object { $_.Key -eq $key })
     Assert-True ("Module '$key' is discovered") ($m.Count -eq 1)
 }

@@ -69,6 +69,7 @@ Modules (type the key):
    browser     Browser hijack and redirect detection
    driver      Driver problem and rollback assistant
    stress      Load and stability testing
+   network     Network diagnosis and repair
 ```
 
 From the menu a module **always runs read-only first**, prints what it found,
@@ -94,6 +95,9 @@ Non-interactive:
 .\Invoke-TuneUp.ps1 -Module stress                           # preflight, no load
 .\Invoke-TuneUp.ps1 -Module stress -Apply -Minutes 10        # sustained load with telemetry
 .\Invoke-TuneUp.ps1 -Module stress -Apply -MaxTempC 90       # lower the abort threshold
+.\Invoke-TuneUp.ps1 -Module network                          # walk the ladder, change nothing
+.\Invoke-TuneUp.ps1 -Module network -Apply                   # safe repairs only
+.\Invoke-TuneUp.ps1 -Module network -Apply -Disruptive       # + winsock / stack reset (reboot)
 ```
 
 Default action is `Report`, which changes nothing. That is deliberately what you
@@ -242,6 +246,54 @@ reset**; that is where bookmarks and passwords live.
 Only the **host** of a redirect URL is ever recorded, never the full URL,
 because hijack URLs routinely carry a machine-tied id in the query string.
 
+### network
+
+The value is the **ladder**, not the reset commands. "No internet" is a
+symptom with six candidate layers under it, and running the whole reset stack
+because someone said the wifi is broken is how you turn a bad DNS entry into a
+machine that has lost its static address.
+
+```
+1 link      adapter up, cable or radio associated
+2 address   an IP that is not APIPA
+3 gateway   the router answers
+4 internet  a public IP answers - routing works
+5 dns       names resolve
+6 http      traffic completes, and is not a captive portal
+```
+
+**A rung that fails while something above it passes has not failed — its probe
+is blocked.** Most routers and firewalls drop ICMP, so a silent gateway with
+working internet is normal; those are marked `filtd` and explained, not
+reported as the fault. The failing layer is the lowest failure *above* the
+highest pass. (This was a real bug caught on the module's first live run — it
+blamed a healthy router.)
+
+APIPA (`169.254.x`) is called out specifically: the adapter and stack are fine
+and nothing answered DHCP. The HTTP rung checks the response *body*, so a
+captive portal answering 200 with a login page reads as a portal rather than
+as working internet.
+
+Repairs are tiered by blast radius:
+
+| Tier | Actions | Cost |
+|---|---|---|
+| Safe (`-Apply`) | flush DNS, clear ARP/NetBIOS, DHCP release+renew | brief drop |
+| Disruptive (`-Disruptive`) | `netsh winsock reset`, `netsh int ip reset` | **reboot, and the stack reset wipes static IP config** |
+
+Disruptive is opt-in and writes the full IP configuration to a local file
+first. A machine with a static address is usually static for a reason — a
+printer, a line-of-business host, a site with no DHCP — and handing it back on
+DHCP is a fault you introduced. DHCP release/renew is skipped automatically on
+a static machine, since it only muddies the picture.
+
+Proxy, hosts entries, disabled firewall profiles and domain membership are
+reported as context, never changed. Firewall rules are never touched.
+
+Addresses and MACs are classified, never recorded — the report says `APIPA`,
+`static`, `gateway reachable`, which is the diagnostic content and survives
+redaction intact.
+
 ### driver
 
 **This module does not roll back drivers**, and that is a finished decision.
@@ -374,6 +426,7 @@ modules\Manage-StartupItems.ps1  startup inventory, reversible disable
 modules\Repair-BrowserHijack.ps1 redirect detection, narrow repair
 modules\Repair-DriverRollback.ps1 device faults, rollback guidance
 modules\Test-SystemStress.ps1    load testing with thermal telemetry
+modules\Repair-Network.ps1       connectivity ladder, tiered repairs
 tools\                           third-party utilities (gitignored)
 tests\Run-AllTests.ps1           runs every suite
 tests\Test-Sanitizer.ps1         redaction
@@ -382,6 +435,7 @@ tests\Test-BrowserHijack.ps1     shortcut detection and repair
 tests\Test-Startup.ps1           StartupApproved encoding + classification
 tests\Test-Driver.ps1            problem codes + boot-critical risk tiers
 tests\Test-Stress.ps1            temp conversion, caps, safety interlocks
+tests\Test-Network.ps1           address classification, ladder logic
 ```
 
 ---
@@ -389,7 +443,7 @@ tests\Test-Stress.ps1            temp conversion, caps, safety interlocks
 ## Testing status
 
 Run everything with `tests\Run-AllTests.ps1`. Verified on Windows 11 24H2
-(26100), PowerShell 5.1 — 207 assertions across six suites, all passing:
+(26100), PowerShell 5.1 — 238 assertions across seven suites, all passing:
 
 - **Sanitizer (29):** live hostname/account/profile-path redaction, synthetic
   MAC/IPv4/email/user-path/product-key/GUID/SID, nested object graphs, a
@@ -397,7 +451,7 @@ Run everything with `tests\Run-AllTests.ps1`. Verified on Windows 11 24H2
   *not* redacted, and list-shape round trips at the 0 and 1 boundaries. Plus
   an independent leak check of a generated report against this machine's real
   serials.
-- **Modules (47):** discovery, manifest validation, unique keys, and 28
+- **Modules (53):** discovery, manifest validation, unique keys, and 28
   classification cases covering runtimes, OEM utilities, antivirus, consumer
   junk and unknowns — plus a live sweep asserting no System-signed package on
   this machine is removal-eligible.
@@ -420,12 +474,19 @@ degradation, and execution from the stick.
 - **Stress (26):** deci-Kelvin conversion at four reference points, duration
   caps, preflight proven read-only by elapsed time, disk-health interlock
   shape, sensor status honesty, and tool discovery listing executables only.
+- **Network (28):** address classification including both RFC1918 boundaries
+  (`172.15` and `172.32` must read as public), APIPA and static verdicts, and
+  ladder logic — gateway-down-plus-dns-down reports gateway, a genuine DNS
+  fault reports DNS, a captive portal reports http, and an ICMP-filtered
+  gateway under working internet reports *no fault at all*. Plus a check that
+  the snapshot carries no IPv4 or MAC address.
 
 **Not yet exercised end-to-end:** the elevated write paths — actual
 `RestoreHealth`, `sfc /scannow`, update installation, cache deletion, real
 `Remove-AppxPackage`, the proxy-registry fix, a real startup disable/restore
-cycle against live `StartupApproved` keys, `Checkpoint-Computer`, and an
-actual `-Apply` load run. Their dry-run, preflight and refusal paths are
+cycle against live `StartupApproved` keys, `Checkpoint-Computer`, an actual
+`-Apply` load run, and the network repairs (`ipconfig /renew`, `netsh winsock
+reset`, `netsh int ip reset`). Their dry-run, preflight and refusal paths are
 tested; the halves that change or load a machine are not. Those need a bench
 run before you trust them on a customer's hardware.
 

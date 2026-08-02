@@ -30,6 +30,10 @@ param(
     [int]$Threads,
     [switch]$Force,
 
+    # Network: opt in to winsock / TCP-IP stack resets. Both need a reboot,
+    # and the stack reset wipes static IP configuration.
+    [switch]$Disruptive,
+
     [switch]$IncludeDrivers,
     [switch]$IncludeComponentCleanup,
     [string]$SourcePath,
@@ -321,6 +325,7 @@ function Invoke-Action {
                 Provisioned     = [bool]$Provisioned
                 Restore         = [bool]$Restore
                 Force           = [bool]$Force
+                Disruptive      = [bool]$Disruptive
             }
             # Only pass numeric options through when actually supplied, so a
             # module keeps its own default instead of receiving 0.

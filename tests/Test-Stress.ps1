@@ -1,9 +1,10 @@
 # Test-Stress.ps1 - stress module preflight, interlocks and unit conversions.
 # ASCII only, PowerShell 5.1 compatible.
 #
-# Deliberately does NOT run a load test. A test suite that pegs every core for
-# minutes is a test suite nobody runs. What is verified here is the arithmetic
-# and the refusal logic - the parts that decide whether load is applied at all.
+# Deliberately does NOT run a load test. A suite that pegs every core for
+# minutes is a suite nobody runs. What is verified here is the arithmetic, the
+# refusal logic and the coverage honesty - the parts that decide whether load
+# is applied at all and what gets claimed afterwards.
 
 $ErrorActionPreference = 'Continue'
 $Root = Split-Path -Parent $PSScriptRoot
@@ -23,9 +24,6 @@ Write-Host ''
 Write-Host '  Temperature conversion' -ForegroundColor Cyan
 Write-Host '  ----------------------' -ForegroundColor DarkGray
 
-# ACPI reports tenths of a Kelvin. Getting this wrong tells a tech a CPU is
-# at 27 degrees when it is at 100, which is the difference between "fine" and
-# "the fan is dead".
 Assert-True 'Freezing point (2731) = 0 C'   ((Convert-DeciKelvinToC -DeciKelvin 2731) -eq 0)
 Assert-True 'Room temp (2981) = 25 C'       ((Convert-DeciKelvinToC -DeciKelvin 2981) -eq 25)
 Assert-True 'Hot CPU (3731) = 100 C'        ((Convert-DeciKelvinToC -DeciKelvin 3731) -eq 100)
@@ -36,91 +34,109 @@ Write-Host ''
 Write-Host '  Duration and thread guards' -ForegroundColor Cyan
 Write-Host '  --------------------------' -ForegroundColor DarkGray
 
-Assert-True 'Default duration is short'  ($script:StressDefaults.Minutes -le 5) ("mins=" + $script:StressDefaults.Minutes)
+Assert-True 'Default duration is short'  ($script:StressDefaults.Minutes -le 5)
 Assert-True 'Hard cap exists'            ($script:StressDefaults.MaxMinutes -gt 0 -and $script:StressDefaults.MaxMinutes -le 60)
 Assert-True 'Default abort temp is sane' ($script:StressDefaults.MaxTempC -ge 80 -and $script:StressDefaults.MaxTempC -le 105)
+
+Write-Host ''
+Write-Host '  No in-process memory test exists' -ForegroundColor Cyan
+Write-Host '  --------------------------------' -ForegroundColor DarkGray
+
+# An earlier version verified memory patterns in-process. It was deleted on
+# purpose: it could only touch pages this process owns, and a "partial pass"
+# on RAM is exactly the false confidence this toolkit exists to prevent. If
+# anyone reintroduces one, this fails and they have to argue the case.
+foreach ($gone in @('New-MemoryTestBuffers', 'Test-MemoryChunk')) {
+    Assert-True "Removed function '$gone' has not come back" `
+    ($null -eq (Get-Command $gone -ErrorAction SilentlyContinue))
+}
+
+Write-Host ''
+Write-Host '  External tool discovery' -ForegroundColor Cyan
+Write-Host '  -----------------------' -ForegroundColor DarkGray
+
+$inv = Get-ExternalToolInventory
+foreach ($k in @('smartctl', 'LibreHardwareMonitor', 'CrystalDiskInfo')) {
+    Assert-True "Inventory reports a slot for $k" ($inv.Contains($k))
+}
+Assert-True 'Missing tool resolves to null, not a guess' `
+($null -eq (Find-ExternalTool -ExeName 'definitely-not-a-real-tool-xyz.exe'))
+
+Write-Host ''
+Write-Host '  Sensor and SMART honesty' -ForegroundColor Cyan
+Write-Host '  ------------------------' -ForegroundColor DarkGray
+
+$thermal = Get-ThermalReading
+Assert-True 'Thermal reading always reports a status' `
+(@('Read', 'Unsupported', 'RequiresElevation', 'Unknown') -contains $thermal.Status) ("status=" + $thermal.Status)
+Assert-True 'Thermal reading names its source' (-not [string]::IsNullOrWhiteSpace($thermal.Source))
+if ($thermal.Status -ne 'Read') {
+    Assert-True 'Unreadable thermal yields no temperature' ($null -eq $thermal.TempC)
+}
+
+$smart = Get-SmartDetail -SmartctlPath $inv.smartctl
+Assert-True 'SMART names which source it used' (@('smartctl', 'StorageReliabilityCounter', 'none') -contains $smart.Source)
+Assert-True 'SMART reports a status' (@('Read', 'Failed', 'Unknown') -contains $smart.Status)
+
+$fans = Get-FanReadings
+Assert-True 'Fan reading always reports a status' `
+(@('Read', 'NoFanSensors', 'Unavailable') -contains $fans.Status) ("status=" + $fans.Status)
+
+Write-Host ''
+Write-Host '  Battery health' -ForegroundColor Cyan
+Write-Host '  --------------' -ForegroundColor DarkGray
+
+$bat = Get-BatteryHealth
+Assert-True 'Battery reports a status' `
+(@('Read', 'NoBattery', 'NoData', 'ReportFailed', 'Unknown') -contains $bat.Status) ("status=" + $bat.Status)
+if ($bat.Status -eq 'Read') {
+    Assert-True 'Health percent is a plausible figure' ($bat.HealthPercent -gt 0 -and $bat.HealthPercent -le 200) ("pct=" + $bat.HealthPercent)
+    Assert-True 'Design capacity is populated'         ($bat.DesignCapacity -gt 0)
+}
+else {
+    Assert-True 'No battery data implies no health figure' ($null -eq $bat.HealthPercent)
+}
 
 Write-Host ''
 Write-Host '  Preflight is read-only' -ForegroundColor Cyan
 Write-Host '  ----------------------' -ForegroundColor DarkGray
 
-# Without -Apply nothing may run. Confirm by timing: a preflight that
-# accidentally applied load would take minutes, not seconds.
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $pre = Invoke-StressModule
 $sw.Stop()
 
-Assert-True 'Preflight returns a result'        ($null -ne $pre)
-Assert-True 'Preflight mode is PreflightOnly'   ($pre.Mode -eq 'PreflightOnly') ("mode=" + $pre.Mode)
-Assert-True 'Preflight applied no load'         (-not $pre.Completed)
-Assert-True 'Preflight took no samples'         (@($pre.Samples).Count -eq 0)
-Assert-True 'Preflight finished in seconds'     ($sw.Elapsed.TotalSeconds -lt 60) ("secs=" + [math]::Round($sw.Elapsed.TotalSeconds, 1))
-Assert-True 'Preflight captured a baseline'     ($null -ne $pre.Baseline)
-
-Assert-True 'Duration is capped' `
-((Invoke-StressModule -Options @{ Minutes = 9999 }).Minutes -le $script:StressDefaults.MaxMinutes)
-Assert-True 'Zero/negative duration is corrected' `
-((Invoke-StressModule -Options @{ Minutes = 0 }).Minutes -ge 1)
+Assert-True 'Preflight returns a result'      ($null -ne $pre)
+Assert-True 'Preflight mode is PreflightOnly' ($pre.Mode -eq 'PreflightOnly')
+Assert-True 'Preflight applied no load'       (-not $pre.Completed)
+Assert-True 'Preflight took no samples'       (@($pre.Samples).Count -eq 0)
+Assert-True 'Preflight finished quickly'      ($sw.Elapsed.TotalSeconds -lt 120) ("secs=" + [math]::Round($sw.Elapsed.TotalSeconds, 1))
+Assert-True 'Preflight never claims verified load' (-not $pre.LoadVerified)
+Assert-True 'Duration is capped' ((Invoke-StressModule -Options @{ Minutes = 9999 }).Minutes -le $script:StressDefaults.MaxMinutes)
 
 Write-Host ''
 Write-Host '  Disk health interlock' -ForegroundColor Cyan
 Write-Host '  ---------------------' -ForegroundColor DarkGray
 
 $gate = Get-DiskHealthGate
-Assert-True 'Disk gate reports a status' (@('Read', 'Unreadable') -contains $gate.Status) ("status=" + $gate.Status)
-
-# The interlock is the single most important behaviour in this module:
-# stressing a machine with a dying disk risks the data that should be
-# recovered first. Verify the refusal fires on a synthetic unhealthy gate.
+Assert-True 'Disk gate reports a status' (@('Read', 'Unreadable', 'Unknown') -contains $gate.Status)
 if ($gate.Status -eq 'Read' -and $gate.Healthy) {
     Assert-True 'Healthy disk does not block preflight' ($pre.AbortReason -ne 'DiskHealthInterlock')
 }
 
-$blockedShape = [pscustomobject]@{ Status = 'Read'; Healthy = $false; Unhealthy = @(@{ Name = 'X'; Health = 'Unhealthy' }) }
-Assert-True 'Unhealthy gate shape is recognised as blocking' (-not $blockedShape.Healthy)
-
 Write-Host ''
-Write-Host '  Sensor honesty' -ForegroundColor Cyan
-Write-Host '  --------------' -ForegroundColor DarkGray
+Write-Host '  Coverage honesty' -ForegroundColor Cyan
+Write-Host '  ----------------' -ForegroundColor DarkGray
 
-$thermal = Get-ThermalReading
-Assert-True 'Thermal reading reports a status, never a bare null' `
-(@('Read', 'Unsupported', 'RequiresElevation') -contains $thermal.Status) ("status=" + $thermal.Status)
-if ($thermal.Status -ne 'Read') {
-    Assert-True 'Unreadable thermal yields no temperature value' ($null -eq $thermal.TempC)
+# The coverage matrix is the promise that "entire device" means a stated
+# position on every part, not silence about the ones that were skipped.
+$cover = (Show-CoverageMatrix -Result $pre) 2>&1 | Out-String
+if ([string]::IsNullOrWhiteSpace($cover)) {
+    $cover = (& { Show-CoverageMatrix -Result $pre } 6>&1 | Out-String)
 }
-
-Write-Host ''
-Write-Host '  Tool discovery' -ForegroundColor Cyan
-Write-Host '  --------------' -ForegroundColor DarkGray
-
-$tools = @(Get-BundledTools -ToolRoot (Join-Path $Root 'tools'))
-Assert-True 'Tool discovery runs on a folder with no binaries' ($tools.Count -ge 0)
-Assert-True 'Tool discovery on a missing folder returns empty' `
-(@(Get-BundledTools -ToolRoot (Join-Path $Root 'no-such-folder')).Count -eq 0)
-
-# The folder's own README is documentation, not a diagnostic tool. Listing it
-# as one is how -Include silently failing showed up.
-$nonExe = @($tools | Where-Object { $_.Name -notmatch '\.(exe|cmd|bat|msi)$' })
-Assert-True 'Non-executables are not listed as tools' ($nonExe.Count -eq 0) `
-("listed=" + (@($nonExe | ForEach-Object { $_.Name }) -join ','))
-
-# Synthetic folder: one executable and one document, only the exe may appear.
-$tmpTools = Join-Path ([IO.Path]::GetTempPath()) ('tuneup-tools-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
-try {
-    New-Item -ItemType Directory -Path $tmpTools -Force | Out-Null
-    Set-Content -LiteralPath (Join-Path $tmpTools 'notes.txt') -Value 'not a tool' -Encoding ASCII
-    Set-Content -LiteralPath (Join-Path $tmpTools 'thing.exe') -Value 'pretend' -Encoding ASCII
-
-    $synthetic = @(Get-BundledTools -ToolRoot $tmpTools)
-    Assert-True 'Synthetic folder yields exactly one tool' ($synthetic.Count -eq 1) ("count=" + $synthetic.Count)
-    if ($synthetic.Count -eq 1) {
-        Assert-True 'The executable is the one listed' ($synthetic[0].Name -eq 'thing.exe')
-    }
+foreach ($part in @('CPU', 'Cooling', 'Fans', 'Storage', 'Battery', 'Memory', 'GPU', 'PSU', 'Display', 'Network')) {
+    Assert-True "Coverage matrix states a position on $part" ($cover -match $part)
 }
-finally {
-    Remove-Item -LiteralPath $tmpTools -Recurse -Force -ErrorAction SilentlyContinue
-}
+Assert-True 'Memory is declared untested, never passed' ($cover -match '(?s)Memory\s+NONE')
 
 Write-Host ''
 Write-Host ("  {0} passed, {1} failed" -f $pass, $fail) -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })

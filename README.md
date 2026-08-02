@@ -336,39 +336,79 @@ embed hardware serials (`USB\VID_xxxx&PID_xxxx\<serial>`).
 
 ### stress
 
-Not a benchmark. The point is reproducing *"it shuts off when it gets warm"*
-or *"it crawls after ten minutes"* on the bench, with the telemetry that says
-which layer failed — thermal, firmware throttle, or power.
+**An orchestration and evidence layer, not a measurement layer.** Established
+open-source tools measure hardware better than anything written here, so this
+drives them where they exist and falls back to Windows' APIs where they do
+not. It contributes three things they don't:
 
-**The interlock that matters: it refuses to run when a disk is not reporting
-healthy.** Stressing a machine with a dying drive risks the data you should be
-recovering first. Image it, get the data off, then test hardware. `-Force`
-overrides it and the tool states plainly what is being overridden.
+1. **WHEA correlation.** Snapshot the hardware error log, apply load, snapshot
+   again, attribute anything *new* to a component. That is what answers "which
+   part is failing" — the load exists to provoke errors, the event diff names
+   the culprit. Errors that appear under load and not before is the strongest
+   evidence available from inside Windows.
+2. **The disk-health interlock** — refuses to run when a drive is not
+   reporting healthy, because the data comes off first. `-Force` overrides and
+   says what is being overridden.
+3. **The sanitized report**, so findings can leave the customer's machine.
 
-Applies load across every logical core and samples temperature and
-`% Processor Performance` — the latter is the useful one, because sustained
-running *below* base clock is the signature of throttling. Afterwards it
-counts `Kernel-Processor-Power` ID 37 events, which is the firmware saying in
-its own words that it limited the CPU.
+Every source is matched on provider **and** event ID. `Kernel-Power` alone
+emits hundreds of routine power-state events; only ID 41 is an unexpected
+shutdown.
 
-Aborts automatically above `-MaxTempC` (default 95). Where a machine exposes
-no ACPI thermal zone — common on laptops — it says so and warns that the
-thermal abort will not work, rather than running blind and implying safety.
-Duration defaults to 2 minutes and is hard-capped at 30.
+**There is no in-process memory test, deliberately.** An earlier version
+verified memory patterns in-process and was deleted: it can only touch pages
+this process owns, and a "partial pass" on RAM is exactly the false confidence
+this toolkit exists to prevent. A test asserts those functions have not come
+back. Use MemTest86+ from a boot device.
 
-Load workers are stopped in a `finally` block, so Ctrl-C, an abort or an error
-all shut them down. Leaving CPU-pegging jobs behind on a customer's machine is
-not an acceptable failure mode.
+Every run prints a **coverage matrix** — a stated position on every component,
+so "entire device" never means silence about the parts that were skipped:
 
-**No disk write tests, ever.** A throughput benchmark that writes to a
-customer's volume is not worth the risk. Memory test (`mdsched.exe`) and
-surface scans (`chkdsk /scan`, `/r`) need a reboot or hours, so the module
-prints the commands instead of running them.
+| Part | Coverage |
+|---|---|
+| CPU | FULL — all-core load, clocks sampled, WHEA diffed |
+| Cooling | FULL with LibreHardwareMonitor, else PARTIAL (ACPI only) |
+| Fans | FULL with LHM — checks RPM *ramps* under load; a fan at idle speed while the CPU cooks is seized |
+| Storage | FULL with smartctl (attributes), else PARTIAL; plus a read-only surface read |
+| Battery | FULL — design vs full-charge capacity and cycle count via `powercfg` |
+| Memory | NONE — MemTest86+, several passes |
+| GPU | OBSERVED — temps and driver resets only; load it with FurMark/OCCT |
+| PSU | INFERRED — suspect it on a drop with no thermal or WHEA cause |
+| Display | NONE — physical inspection |
+| Network | NONE — run the `network` module |
 
-Third-party tools go in `tools\` on the stick — see `tools\README.md`. The
-module lists what it finds and does not launch anything. **No vendor binaries
-are in git**: most disallow redistribution, they are large and freely
-re-downloadable, and a repo is the wrong place for them.
+Load is verified, not assumed: it samples actual CPU utilisation and reports
+**LOAD NOT APPLIED** if the mean is under 70%. A pass on a machine that was
+never loaded is worse than no result. Workers are checked for `Running` after
+start and stopped in a `finally`, so Ctrl-C, abort and error all clean up.
+
+**No disk write tests, ever**, and no reboots. `mdsched.exe` and
+`chkdsk /r` are printed, not run.
+
+### Provisioning the tools
+
+```powershell
+.\Install-Tools.ps1                 # inventory, changes nothing
+.\Install-Tools.ps1 -Install        # winget install on THIS machine
+.\Install-Tools.ps1 -CopyToStick    # copy binaries into tools\
+```
+
+Three, all genuinely open source rather than free-for-personal-use — which
+matters on a paid bench, where OCCT and HWiNFO's personal licences do not
+apply. Verify current terms yourself before relying on them.
+
+| Tool | Licence | Why |
+|---|---|---|
+| smartmontools | GPL v2 | SMART attributes — reallocated/pending sectors, media errors |
+| LibreHardwareMonitor | MPL 2.0 | Temps **and fan RPM** where ACPI exposes nothing |
+| CrystalDiskInfo | MIT | Readable SMART GUI to show a customer |
+
+**Run it on your own bench machine, not a customer's** — then `-CopyToStick`
+so the field toolkit installs nothing on the target. LibreHardwareMonitor must
+be *running* (and elevated) to publish its WMI namespace; installed but closed
+is no use.
+
+`tools\` is gitignored. No vendor binaries in the repo.
 
 ## Deliberate limits
 

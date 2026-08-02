@@ -401,9 +401,19 @@ function Invoke-ModuleFromMenu {
     $script:Apply = $false
     Invoke-ActionSafely -Name 'Module'
 
+    # Wording matters: "apply fixes" is meaningless for a module that runs a
+    # load test, and reads as though there is nothing to do.
+    $prompt = '  Apply fixes for this module?'
+    if ($Key -eq 'stress') { $prompt = '  Run the load test now? It will peg every core for the full duration.' }
+    if ($Key -eq 'driver') { $prompt = '  Create a System Restore point? (this module never rolls drivers back)' }
+
     Write-Host ''
-    $answer = Read-Host '  Apply fixes for this module? Type YES to proceed, anything else to skip'
-    if ($answer -cne 'YES') {
+    Write-Host $prompt -ForegroundColor Cyan
+    $answer = Read-Host '  Type YES to proceed, anything else to skip'
+
+    # Case-INsensitive. The earlier -cne meant typing "yes" silently skipped,
+    # which looked exactly like the module refusing to do anything.
+    if ($answer -ne 'YES') {
         Write-Host '  Skipped. Nothing was changed.' -ForegroundColor Gray
         return
     }

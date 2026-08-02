@@ -116,6 +116,15 @@ function Convert-DeciKelvinToC {
 function Get-ThermalReading {
     $out = [ordered]@{ Status = 'Unknown'; Source = 'none'; TempC = $null; ZoneCount = 0 }
 
+    $web = @(Get-LhmWebSensors | Where-Object { $_.Group -eq 'Temperatures' -and $_.Value -gt 0 })
+    if ($web.Count -gt 0) {
+        $out.Status = 'Read'
+        $out.Source = 'LibreHardwareMonitor'
+        $out.ZoneCount = $web.Count
+        $out.TempC = [math]::Round((($web | Measure-Object -Property Value -Maximum).Maximum), 1)
+        return [pscustomobject]$out
+    }
+
     try {
         $sensors = @(Get-CimInstance -Namespace 'root/LibreHardwareMonitor' -ClassName 'Sensor' -ErrorAction Stop |
                 Where-Object { $_.SensorType -eq 'Temperature' -and $_.Value -gt 0 })
@@ -276,8 +285,149 @@ function Get-SmartDetail {
 # check here - the CPU just throttles and looks merely slow. Needs
 # LibreHardwareMonitor; Windows exposes nothing usable.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# LibreHardwareMonitor only publishes its WMI namespace while it is RUNNING,
+# so the toolkit starts it rather than relying on the tech to remember.
+#
+# This is done even though it is a change to the machine, because the thermal
+# abort is a SAFETY mechanism: without a temperature source the stress test
+# cannot stop when a machine overheats. Running a thermal load test blind is a
+# worse thing to do to someone's hardware than loading a signed sensor driver.
+#
+# Be aware of what it does: LHM loads a kernel-mode driver to reach SuperIO and
+# SMBus sensors. That is how every tool in this class works (HWiNFO, OCCT), but
+# it is not nothing, and some AV products flag it. The module says so, and if
+# it started LHM it also stops it afterwards so the machine is left as found.
+# ---------------------------------------------------------------------------
+$script:LhmPort = 8085
+
+# LibreHardwareMonitor 0.9.6 does not publish the root\LibreHardwareMonitor WMI
+# namespace - it runs for a minute and the namespace never appears at all
+# ("Invalid namespace"). There is no user-facing WMI toggle in this build.
+#
+# Its web server IS available and documented, so that is what gets used:
+# enable it in the config before launch, then read the sensor tree as JSON from
+# localhost. WMI is still tried first in case a build or version does publish
+# it, but nothing depends on it.
+function Set-SensorProviderConfig {
+    param([string]$ExePath)
+    if (-not $ExePath) { return }
+    $cfg = Join-Path (Split-Path -Parent $ExePath) 'LibreHardwareMonitor.config'
+    $xml = @"
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <appSettings>
+    <add key="runWebServerMenuItem" value="true" />
+    <add key="listenerPort" value="$($script:LhmPort)" />
+    <add key="minTrayMenuItem" value="true" />
+    <add key="startMinMenuItem" value="true" />
+  </appSettings>
+</configuration>
+"@
+    try { Set-Content -LiteralPath $cfg -Value $xml -Encoding UTF8 -WhatIf:$false } catch { }
+}
+
+# Flatten LHM's nested sensor tree. Nodes carry a formatted Value like
+# "45.0 C" or "1200 RPM"; the numeric part is what matters, and the group name
+# ("Temperatures", "Fans") is what identifies the kind.
+function Get-LhmWebSensors {
+    $out = @()
+    try {
+        $raw = Invoke-WebRequest -Uri ("http://localhost:{0}/data.json" -f $script:LhmPort) `
+            -UseBasicParsing -TimeoutSec 4 -ErrorAction Stop
+        $root = $raw.Content | ConvertFrom-Json
+    }
+    catch { return $out }
+
+    $stack = New-Object 'System.Collections.Generic.Stack[object]'
+    $stack.Push([pscustomobject]@{ Node = $root; Group = '' })
+
+    while ($stack.Count -gt 0) {
+        $item = $stack.Pop()
+        $n = $item.Node
+        $group = $item.Group
+
+        $kids = @()
+        try { $kids = @($n.Children) } catch { }
+
+        if ($kids.Count -gt 0) {
+            $nextGroup = $group
+            if ($n.Text -match '^(Temperatures|Fans|Voltages|Powers|Clocks|Load|Controls)$') { $nextGroup = $n.Text }
+            foreach ($k in $kids) { $stack.Push([pscustomobject]@{ Node = $k; Group = $nextGroup }) }
+            continue
+        }
+
+        $val = [string]$n.Value
+        if ([string]::IsNullOrWhiteSpace($val)) { continue }
+        $num = $null
+        if ($val -match '(-?\d+(?:[.,]\d+)?)') {
+            try { $num = [double](($Matches[1]) -replace ',', '.') } catch { }
+        }
+        if ($null -eq $num) { continue }
+
+        $out += [pscustomobject]@{ Name = [string]$n.Text; Group = $group; Value = $num; Raw = $val }
+    }
+    return $out
+}
+
+function Start-SensorProvider {
+    param([string]$ExePath)
+
+    $out = [ordered]@{ Started = $false; Process = $null; Status = 'NotAttempted' }
+
+    if (-not $ExePath) { $out.Status = 'NotInstalled'; return [pscustomobject]$out }
+
+    if (Get-Process -Name 'LibreHardwareMonitor' -ErrorAction SilentlyContinue) {
+        # Already running - use it, but do NOT stop something we did not start.
+        $out.Status = 'AlreadyRunning'
+        return [pscustomobject]$out
+    }
+
+    if (-not (Test-IsAdmin)) {
+        $out.Status = 'NeedsElevation'
+        return [pscustomobject]$out
+    }
+
+    try {
+        Set-SensorProviderConfig -ExePath $ExePath
+        $p = Start-Process -FilePath $ExePath -WindowStyle Minimized -PassThru -ErrorAction Stop
+        $out.Process = $p
+        $out.Started = $true
+
+        # Sensors take a few seconds to come up after launch.
+        for ($i = 0; $i -lt 25; $i++) {
+            Start-Sleep -Milliseconds 800
+            if (@(Get-LhmWebSensors).Count -gt 0) { $out.Status = 'Running'; return [pscustomobject]$out }
+            try {
+                $probe = @(Get-CimInstance -Namespace 'root/LibreHardwareMonitor' -ClassName 'Sensor' -ErrorAction Stop)
+                if ($probe.Count -gt 0) { $out.Status = 'Running'; return [pscustomobject]$out }
+            }
+            catch { }
+        }
+        $out.Status = 'StartedButNoSensors'
+    }
+    catch {
+        $out.Status = 'LaunchFailed'
+    }
+    return [pscustomobject]$out
+}
+
+function Stop-SensorProvider {
+    param($Handle)
+    if (-not $Handle -or -not $Handle.Started -or -not $Handle.Process) { return }
+    try { Stop-Process -Id $Handle.Process.Id -Force -ErrorAction SilentlyContinue } catch { }
+}
+
 function Get-FanReadings {
     $out = [ordered]@{ Status = 'Unavailable'; Fans = @() }
+
+    $web = @(Get-LhmWebSensors | Where-Object { $_.Group -eq 'Fans' })
+    if ($web.Count -gt 0) {
+        foreach ($f in $web) { $out.Fans += [ordered]@{ Name = $f.Name; Rpm = [int]$f.Value } }
+        $out.Status = 'Read'
+        return [pscustomobject]$out
+    }
+
     try {
         $fans = @(Get-CimInstance -Namespace 'root/LibreHardwareMonitor' -ClassName 'Sensor' -ErrorAction Stop |
                 Where-Object { $_.SensorType -eq 'Fan' })
@@ -292,6 +442,9 @@ function Get-FanReadings {
 }
 
 function Get-GpuTemperature {
+    $web = @(Get-LhmWebSensors | Where-Object { $_.Group -eq 'Temperatures' -and $_.Name -match '(?i)gpu' -and $_.Value -gt 0 })
+    if ($web.Count -gt 0) { return [math]::Round((($web | Measure-Object -Property Value -Maximum).Maximum), 1) }
+
     try {
         $g = @(Get-CimInstance -Namespace 'root/LibreHardwareMonitor' -ClassName 'Sensor' -ErrorAction Stop |
                 Where-Object { $_.SensorType -eq 'Temperature' -and $_.Identifier -like '*gpu*' -and $_.Value -gt 0 })
@@ -487,6 +640,7 @@ function Invoke-StressModule {
     if ($Options['MaxTempC']) { $maxTemp = [int]$Options['MaxTempC'] }
     $force = [bool]$Options['Force']
     $skipDisk = [bool]$Options['SkipDisk']
+    $noLaunchSensors = [bool]$Options['NoLaunchSensors']
 
     $threads = 0
     try { $threads = (Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).NumberOfLogicalProcessors } catch { }
@@ -504,6 +658,8 @@ function Invoke-StressModule {
             LibreHardwareMonitor = [bool]$tools.LibreHardwareMonitor
             CrystalDiskInfo = [bool]$tools.CrystalDiskInfo
         }
+        SensorProvider = 'NotAttempted'
+        SensorsUsable = $false
         Baseline = $null; DiskGate = $null; OnBattery = $null
         Samples = @(); PeakTempC = $null; MinPerfPct = $null
         MeanCpuPercent = $null; LoadVerified = $false
@@ -524,6 +680,26 @@ function Invoke-StressModule {
         Write-Host '    Run Install-Tools.ps1 on the bench machine to provision these.' -ForegroundColor DarkGray
     }
 
+    # Bring sensors up BEFORE the baseline reading, so idle temperature and
+    # fan RPM are captured from the same source the run will use.
+    $sensorHandle = $null
+    if (-not $noLaunchSensors) {
+        $sensorHandle = Start-SensorProvider -ExePath $tools.LibreHardwareMonitor
+        switch ($sensorHandle.Status) {
+            'Running' {
+                Write-Host ''
+                Write-Host '  Started LibreHardwareMonitor for temperature and fan sensors.' -ForegroundColor Green
+                Write-Host '  It loads a kernel driver to read them, and will be stopped again' -ForegroundColor DarkGray
+                Write-Host '  when this run finishes. -NoLaunchSensors skips it.' -ForegroundColor DarkGray
+            }
+            'AlreadyRunning' { Write-Log -Message 'LibreHardwareMonitor already running - using it, will not stop it' -Level OK }
+            'NeedsElevation' { Write-Log -Message 'Cannot start LibreHardwareMonitor unelevated - no thermal abort. Re-run via RUN.cmd.' -Level WARN }
+            'NotInstalled' { Write-Log -Message 'LibreHardwareMonitor not on this stick - run Install-Tools.ps1' -Level WARN }
+            default { Write-Log -Message ('LibreHardwareMonitor did not come up: ' + $sensorHandle.Status) -Level WARN }
+        }
+    }
+    $result.SensorProvider = $(if ($sensorHandle) { $sensorHandle.Status } else { 'Skipped' })
+
     $thermal = Get-ThermalReading
     $gate = Get-DiskHealthGate
     $result.DiskGate = $gate
@@ -538,6 +714,11 @@ function Invoke-StressModule {
     }
     catch { }
     $result.OnBattery = $onBattery
+    # Usable means a reading actually came back - NOT that the exe exists.
+    # Reporting coverage from tool presence claimed FULL cooling coverage on a
+    # machine where the provider was installed but not running.
+    $result.SensorsUsable = ($thermal.Status -eq 'Read')
+
     $result.Baseline = [ordered]@{
         Cpu = $cpuName; LogicalCores = $threads
         ThermalStatus = $thermal.Status; ThermalSource = $thermal.Source; IdleTempC = $thermal.TempC
@@ -552,8 +733,16 @@ function Invoke-StressModule {
         Write-Host ('  Idle temp    : {0} C via {1}' -f $thermal.TempC, $thermal.Source) -ForegroundColor Gray
     }
     else {
-        Write-Host ('  Idle temp    : NOT AVAILABLE ({0}) - no thermal abort will happen.' -f $thermal.Status) -ForegroundColor Yellow
-        Write-Host '                 Install LibreHardwareMonitor and leave it running.' -ForegroundColor Yellow
+        Write-Host ('  Idle temp    : NOT AVAILABLE ({0}) - the thermal abort CANNOT fire.' -f $thermal.Status) -ForegroundColor Yellow
+        if ($result.SensorProvider -eq 'NeedsElevation') {
+            Write-Host '                 Re-run via RUN.cmd - sensors start automatically when elevated.' -ForegroundColor Yellow
+        }
+        elseif ($result.SensorProvider -eq 'NotInstalled') {
+            Write-Host '                 Run Install-Tools.ps1 to provision LibreHardwareMonitor.' -ForegroundColor Yellow
+        }
+        else {
+            Write-Host '                 Watch the machine yourself and stop it if it gets hot.' -ForegroundColor Yellow
+        }
     }
 
     # --- SMART summary -------------------------------------------------------
@@ -617,7 +806,11 @@ function Invoke-StressModule {
         foreach ($u in $gate.Unhealthy) { Write-Host ('    {0}: {1}' -f $u.Name, $u.Health) -ForegroundColor Red }
         Write-Host '  Stressing a machine with a failing drive risks the data you should be' -ForegroundColor Yellow
         Write-Host '  recovering first. Image it, get the data off, THEN test hardware.' -ForegroundColor Yellow
-        if (-not $force) { $result.AbortReason = 'DiskHealthInterlock'; return [pscustomobject]$result }
+        if (-not $force) {
+            $result.AbortReason = 'DiskHealthInterlock'
+            Stop-SensorProvider -Handle $sensorHandle
+            return [pscustomobject]$result
+        }
         Write-Log -Message 'Disk health interlock OVERRIDDEN with -Force' -Level WARN
     }
 
@@ -633,10 +826,12 @@ function Invoke-StressModule {
         Write-Host '  or pick "stress" from the RUN.cmd menu and answer YES.' -ForegroundColor Gray
         Write-Host ''
         Show-UntestableComponents -Result $result
+        Stop-SensorProvider -Handle $sensorHandle
         return [pscustomobject]$result
     }
 
     if (-not $PSCmdlet.ShouldProcess(('CPU, {0} thread(s) for {1} minute(s)' -f $threads, $minutes), 'Apply sustained load')) {
+        Stop-SensorProvider -Handle $sensorHandle
         return [pscustomobject]$result
     }
 
@@ -744,6 +939,14 @@ function Invoke-StressModule {
 
     $result.ErrorsDuring = Get-HardwareErrorSnapshot -Since $runStart
     Show-StressVerdict -Result $result
+
+    # Leave the machine as it was found. Only stops what this run started -
+    # if the tech already had it open, it stays open.
+    Stop-SensorProvider -Handle $sensorHandle
+    if ($sensorHandle -and $sensorHandle.Started) {
+        Write-Log -Message 'LibreHardwareMonitor stopped (it was started by this run)' -Level OK
+    }
+
     return [pscustomobject]$result
 }
 
@@ -756,16 +959,44 @@ function Show-CoverageMatrix {
     Write-Host '  COVERAGE - what was and was not actually exercised' -ForegroundColor White
     Write-Host '  -------------------------------------------------' -ForegroundColor DarkGray
 
+    # Key off what was actually READ, not what is installed. Reporting coverage
+    # from tool presence claimed FULL cooling coverage on a machine where the
+    # provider was installed but not running - and contradicted the verdict
+    # directly above it, which correctly said NOT MEASURED.
     $lhm = $false
-    if ($Result -and $Result.Tools) { $lhm = [bool]$Result.Tools.LibreHardwareMonitor }
+    if ($Result) { $lhm = [bool]$Result.SensorsUsable }
     $smart = $false
-    if ($Result -and $Result.Tools) { $smart = [bool]$Result.Tools.smartctl }
+    if ($Result -and $Result.Smart) { $smart = ($Result.Smart.Source -eq 'smartctl' -and $Result.Smart.Status -eq 'Read') }
     $memIso = $null
     if ($Result -and $Result.MemoryTest) { $memIso = $Result.MemoryTest.MemTest86Found }
 
     Write-Cover 'CPU'      'FULL'    'sustained all-core load, clocks sampled, WHEA diffed'
-    Write-Cover 'Cooling'  $(if ($lhm) { 'FULL' } else { 'PARTIAL' }) $(if ($lhm) { 'temps and fan RPM under load' } else { 'ACPI only - install LibreHardwareMonitor for real sensors' })
-    Write-Cover 'Fans'     $(if ($lhm) { 'FULL' } else { 'NONE' })    $(if ($lhm) { 'ramp checked under load' } else { 'no sensor source' })
+    # Cooling and fans are separate sources. ACPI gives a temperature and never
+    # a fan speed, so deriving fan coverage from thermal availability claimed
+    # FULL fan coverage on a machine with no fan sensor at all.
+    $tempOk = $lhm
+    $fanOk = $false
+    if ($Result) { $fanOk = ($Result.FanStatus -eq 'Read') }
+
+    # A temperature that never moves while the CPU goes from idle to pegged is
+    # not a working sensor - it is a fixed ACPI trip point. Calling that a pass
+    # is worse than reporting nothing.
+    $tempStuck = $false
+    if ($Result -and @($Result.Samples).Count -ge 3) {
+        $temps = @($Result.Samples | ForEach-Object { $_.TempC } | Where-Object { $null -ne $_ })
+        if ($temps.Count -ge 3) {
+            $spread = ($temps | Measure-Object -Maximum).Maximum - ($temps | Measure-Object -Minimum).Minimum
+            $tempStuck = ($spread -eq 0)
+        }
+    }
+
+    if ($tempStuck) {
+        Write-Cover 'Cooling' 'UNRELIABLE' 'temperature never moved under load - sensor is not tracking'
+    }
+    else {
+        Write-Cover 'Cooling' $(if ($tempOk) { 'FULL' } else { 'NONE' }) $(if ($tempOk) { 'temps sampled under load, thermal abort armed' } else { 'no temperature source - the thermal abort CANNOT fire' })
+    }
+    Write-Cover 'Fans' $(if ($fanOk) { 'FULL' } else { 'NONE' }) $(if ($fanOk) { 'ramp checked under load' } else { 'no fan sensor - a dead fan would not be detected' })
     Write-Cover 'Storage'  $(if ($smart) { 'FULL' } else { 'PARTIAL' }) $(if ($smart) { 'SMART attributes + read-only surface read' } else { 'Windows counters + surface read; install smartmontools' })
     Write-Cover 'Battery'  'FULL'    'design vs full-charge capacity and cycle count'
     Write-Cover 'Memory'   'NONE'    $(if ($memIso) { "boot $memIso from the stick - several passes" } else { 'get MemTest86+ - nothing in Windows can test RAM the OS is using' })
@@ -825,7 +1056,18 @@ function Show-StressVerdict {
     if ($Result.AbortReason -like 'ThermalLimit*') {
         Write-StressLine 'Cooling' 'FAIL' ('hit ' + $Result.MaxTempC + ' C under load - paste, fan or blocked intake')
     }
-    elseif ($null -ne $Result.PeakTempC) { Write-StressLine 'Cooling' 'PASS' ('peak ' + $Result.PeakTempC + ' C') }
+    elseif ($null -ne $Result.PeakTempC) {
+        # Same check as the coverage matrix: a reading that does not move from
+        # idle to full load is a fixed trip point, not a temperature.
+        $temps = @($Result.Samples | ForEach-Object { $_.TempC } | Where-Object { $null -ne $_ })
+        $flat = ($temps.Count -ge 3 -and (($temps | Measure-Object -Maximum).Maximum - ($temps | Measure-Object -Minimum).Minimum) -eq 0)
+        if ($flat) {
+            Write-StressLine 'Cooling' 'UNRELIABLE' ("stuck at $($Result.PeakTempC) C from idle to full load - not a real reading")
+        }
+        else {
+            Write-StressLine 'Cooling' 'PASS' ('peak ' + $Result.PeakTempC + ' C')
+        }
+    }
     else { Write-StressLine 'Cooling' 'NOT MEASURED' 'no sensor available - install LibreHardwareMonitor' }
 
     # Fans. The signal is whether RPM ROSE under load, not its absolute value:

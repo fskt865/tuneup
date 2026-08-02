@@ -114,6 +114,7 @@ $items = @(
     @{ Src = 'RUN.cmd';           Dst = 'RUN.cmd' },
     @{ Src = 'Invoke-TuneUp.ps1'; Dst = 'Invoke-TuneUp.ps1' },
     @{ Src = 'README.md';         Dst = 'README.md' },
+    @{ Src = 'BENCH-CHECKLIST.md'; Dst = 'BENCH-CHECKLIST.md' },
     @{ Src = 'VERSION';           Dst = 'VERSION' },
     @{ Src = 'lib';               Dst = 'lib' },
     @{ Src = 'tasks';             Dst = 'tasks' },

@@ -481,6 +481,11 @@ degradation, and execution from the stick.
   gateway under working internet reports *no fault at all*. Plus a check that
   the snapshot carries no IPv4 or MAC address.
 
+`BENCH-CHECKLIST.md` is a single ordered pass that closes the list below.
+It is grouped by blast radius — Tier A is safe on a working machine, Tier C is
+scratch-unit only — and each step names the path it closes, so anything
+skipped stays honestly marked untested rather than quietly assumed working.
+
 **Not yet exercised end-to-end:** the elevated write paths — actual
 `RestoreHealth`, `sfc /scannow`, update installation, cache deletion, real
 `Remove-AppxPackage`, the proxy-registry fix, a real startup disable/restore

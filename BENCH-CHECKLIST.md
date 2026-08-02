@@ -297,13 +297,13 @@ needing them.
 
 | # | Step | Result | Notes |
 |---|------|--------|-------|
-| 1 | Suite elevated | | |
-| 2 | Elevated report + leak check | | |
-| 3 | Full `-WhatIf` | | |
-| 4 | DISM + SFC | | |
-| 5 | Restore point | | |
-| 6 | Network safe | | |
-| 7 | Cache clean | | |
+| 1 | Suite elevated | **PASS** 2026-08-02 | 235 assertions (3 unelevated-only branches skip, as designed) |
+| 2 | Elevated report + leak check | **PASS** | All 8 leak probes false. `SmartStatus=Read`, `ComponentStore=Healthy` |
+| 3 | Full `-WhatIf` | **PASS** | 5 reports before and after, log still written |
+| 4 | DISM + SFC | **PASS** | ScanHealth 2m43s, SFC `Clean`. `RestoreHealth` never fired — store healthy |
+| 5 | Restore point | **PASS (failed safe)** | System Protection is OFF on this machine; correctly refused to claim success |
+| 6 | Network safe | **PASS** | All 5 repairs exit 0, ladder green after |
+| 7 | Cache clean | **PASS after fix** | 1.28 GB reclaimed; reporting bug found and fixed |
 | 8 | Startup round trip | | |
 | 9 | Bloatware | | |
 | 10 | Browser apply | | |
@@ -311,6 +311,23 @@ needing them.
 | 12 | Network disruptive | | |
 | 13 | Windows Update + resume | | |
 | 14 | Purge | | |
+
+### Tier A findings, 2026-08-02
+
+Three bugs, all fixed in v1.5.1 and re-verified elevated:
+
+1. **Cache clean under-reported its own success.** Reclaimed 1.28 GB, reported
+   `88.3% -> 88.3%`. Volume free-space counters lag behind deletions, so the
+   figure it trusted was wrong. Now counts bytes actually removed, plus
+   removed/locked per target — the re-run showed `UserTemp reclaimed 0 MB,
+   0 removed, 8 locked`, which is the honest version of the same result.
+2. **Restore point failure was diagnosed as a guess.** The real cause was
+   System Protection being switched off; it now names that and prints
+   `Enable-ComputerRestore`, without running it.
+3. **A drive reporting 0 C was recorded as 0**, not as "not reported".
+
+**Outstanding on this machine:** System Protection is off, so there is no
+rollback safety net here. Worth turning on before running Tier C.
 
 Anything that fails: capture the console output and the log from
 `C:\ProgramData\GSTuneUp` **before** step 14. Anything skipped stays in the

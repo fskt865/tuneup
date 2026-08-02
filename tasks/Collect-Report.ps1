@@ -98,7 +98,9 @@ function Get-TuneUpReport {
                 OperationalStatus   = [string]$pd.OperationalStatus
                 SmartStatus         = $rcStatus
                 Wear                = $rc.Wear
-                TemperatureC        = $rc.Temperature
+                # A drive reporting 0 C is not at freezing, it is not reporting.
+                # Printing 0 invites someone to read it as a real measurement.
+                TemperatureC        = $(if ($rc.Temperature -and $rc.Temperature -gt 0) { $rc.Temperature } else { $null })
                 ReadErrorsTotal     = $rc.ReadErrorsTotal
                 WriteErrorsTotal    = $rc.WriteErrorsTotal
                 PowerOnHours        = $rc.PowerOnHours

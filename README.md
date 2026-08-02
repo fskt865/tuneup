@@ -486,14 +486,40 @@ It is grouped by blast radius — Tier A is safe on a working machine, Tier C is
 scratch-unit only — and each step names the path it closes, so anything
 skipped stays honestly marked untested rather than quietly assumed working.
 
-**Not yet exercised end-to-end:** the elevated write paths — actual
-`RestoreHealth`, `sfc /scannow`, update installation, cache deletion, real
-`Remove-AppxPackage`, the proxy-registry fix, a real startup disable/restore
-cycle against live `StartupApproved` keys, `Checkpoint-Computer`, an actual
-`-Apply` load run, and the network repairs (`ipconfig /renew`, `netsh winsock
-reset`, `netsh int ip reset`). Their dry-run, preflight and refusal paths are
-tested; the halves that change or load a machine are not. Those need a bench
-run before you trust them on a customer's hardware.
+### Tier A: passed on the bench, 2026-08-02
+
+Elevated, Windows 11 24H2. **Now exercised end-to-end:**
+
+- `DISM /CheckHealth` and `/ScanHealth` (2m43s), then `sfc /scannow` — verdict
+  `Clean`. The `-WhatIf` pass in the same run correctly reported
+  `Inconclusive` rather than claiming healthy from a check that never ran.
+- Cache deletion — 1.28 GB reclaimed across temp, CBS logs and the WU cache,
+  with `wuauserv` and `bits` confirmed running afterwards.
+- `Checkpoint-Computer` — correctly reported the restore point was **not**
+  created rather than claiming success.
+- Network safe repairs — flush DNS, ARP clear, NetBIOS reload, DHCP
+  release+renew, all exit 0, ladder still green afterwards.
+- Elevated collection — `SmartStatus` = `Read` with live values,
+  `ComponentStore` = `Healthy`. Independent leak check clean: hostname,
+  username, profile path, BIOS serial, both disk serials, SID, IPv4 and MAC
+  all absent from the report.
+
+Three bugs found and fixed (v1.5.1):
+
+1. Cache clean reclaimed 1.28 GB but reported `88.3% -> 88.3%` — volume free
+   space lags behind deletions. It now counts bytes actually removed, with
+   per-target removed/locked counts, so "nothing reclaimed" can be told apart
+   from "everything was in use".
+2. The restore-point failure listed candidate causes. The real one was
+   **System Protection switched off** — now named specifically, with the
+   enable command printed rather than run.
+3. A drive reporting `0` C was recorded as 0 rather than "not reported".
+
+**Still not exercised:** `DISM /RestoreHealth` (never fired — the store was
+healthy), Windows Update install and the cross-reboot resume, real
+`Remove-AppxPackage`, the proxy-registry fix, a live startup disable/restore
+cycle, an `-Apply` load run, and the disruptive network resets. Tiers B and C
+of `BENCH-CHECKLIST.md` cover these; until they run, treat them as untested.
 
 Detection on a clean machine proves the detectors run, not that they detect.
 The shortcut path is covered by synthetic fixtures; the proxy, policy,

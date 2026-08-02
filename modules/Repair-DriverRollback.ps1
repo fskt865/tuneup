@@ -300,6 +300,7 @@ function Invoke-DriverModule {
         BootCriticalCount = 0
         RestorePoint      = $null
         RestorePointMade  = $false
+        RestorePointBlockedBy = $null
     }
 
     # --- Problem devices --------------------------------------------------
@@ -455,14 +456,34 @@ function Invoke-DriverModule {
             Write-Host '  Restore point created.' -ForegroundColor Green
         }
         catch {
-            # Windows throttles restore points to one per 24h by default, and
-            # silently does nothing. Report that rather than implying a net
-            # exists when it does not.
-            Write-Log -Message ('Restore point NOT created: ' + $_.Exception.Message) -Level FAIL
+            $msg = $_.Exception.Message
+            Write-Log -Message ('Restore point NOT created: ' + $msg) -Level FAIL
             Write-Host '  Restore point was NOT created.' -ForegroundColor Red
-            Write-Host '  Common cause: Windows throttles restore points to one per 24 hours, or' -ForegroundColor Yellow
-            Write-Host '  System Protection is off for this drive. Check System Properties >' -ForegroundColor Yellow
-            Write-Host '  System Protection before doing driver work without a net.' -ForegroundColor Yellow
+
+            # Name the actual cause instead of listing candidates. "The service
+            # cannot be started because it is disabled" means System Protection
+            # is switched off for this machine - a different problem from the
+            # 24-hour throttle, and a much more important one to know about.
+            if ($msg -match 'disabled or does not have enabled devices') {
+                $result.RestorePointBlockedBy = 'SystemProtectionDisabled'
+                Write-Host '  Cause: SYSTEM PROTECTION IS OFF on this machine. There are no restore' -ForegroundColor Yellow
+                Write-Host '  points and none can be made, so there is no rollback safety net at all.' -ForegroundColor Yellow
+                Write-Host '' -ForegroundColor Yellow
+                Write-Host '  Turn it on before driver work (allocates disk, so it is the owner''s call):' -ForegroundColor Yellow
+                Write-Host '    Enable-ComputerRestore -Drive "C:\"' -ForegroundColor DarkGray
+                Write-Host '    or System Properties > System Protection > Configure' -ForegroundColor DarkGray
+                Write-Host '  Not done automatically - it changes a system setting and consumes disk.' -ForegroundColor DarkGray
+            }
+            elseif ($msg -match 'frequency|already') {
+                $result.RestorePointBlockedBy = 'Throttled'
+                Write-Host '  Cause: Windows throttles restore points to one per 24 hours. An earlier' -ForegroundColor Yellow
+                Write-Host '  point today already covers you - check the list above.' -ForegroundColor Yellow
+            }
+            else {
+                $result.RestorePointBlockedBy = 'Unknown'
+                Write-Host '  Cause could not be determined from the error. Check System Properties >' -ForegroundColor Yellow
+                Write-Host '  System Protection before doing driver work without a net.' -ForegroundColor Yellow
+            }
         }
     }
     Write-Host ''

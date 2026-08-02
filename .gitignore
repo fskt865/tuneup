@@ -1,0 +1,9 @@
+# Reports are produced against real machines. They are sanitized by
+# construction, but "sanitized" is a property of the code working correctly,
+# not a guarantee - so they never enter git regardless. Belt and braces.
+reports/
+*.json
+*.log
+
+# Local run state, if anyone ever runs the toolkit straight out of the repo.
+state.json

@@ -66,6 +66,16 @@ function Find-ExternalTool {
     foreach ($p in $ExtraPaths) {
         if ($p -and (Test-Path -LiteralPath $p)) { return $p }
     }
+
+    # winget installs "portable" packages under LOCALAPPDATA, not Program
+    # Files - LibreHardwareMonitor is one, and searching only Program Files
+    # reported it missing immediately after winget said it installed fine.
+    $wingetPkgs = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages'
+    if (Test-Path -LiteralPath $wingetPkgs) {
+        $hit = Get-ChildItem -LiteralPath $wingetPkgs -Recurse -File -Filter $ExeName -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($hit) { return $hit.FullName }
+    }
     return $null
 }
 
@@ -148,18 +158,55 @@ function Get-ThermalReading {
 function Get-SmartDetail {
     param([string]$SmartctlPath)
 
-    $out = [ordered]@{ Source = 'none'; Status = 'Unknown'; Disks = @() }
+    $out = [ordered]@{ Source = 'none'; Status = 'Unknown'; Note = ''; Disks = @() }
 
     if ($SmartctlPath) {
         $out.Source = 'smartctl'
+        $failures = @()
         try {
-            $disks = @(Get-Disk -ErrorAction Stop)
-            foreach ($d in $disks) {
-                $dev = '\\.\PhysicalDrive' + $d.Number
-                $raw = & $SmartctlPath '-j' '-a' $dev 2>$null | Out-String
-                if (-not $raw) { continue }
+            # Let smartctl enumerate its own devices.
+            #
+            # On Windows it does NOT want \\.\PhysicalDriveN - passing that
+            # returns "Unable to detect device type" even elevated, which is
+            # easily mistaken for a permissions problem. --scan reports the
+            # names it actually wants (/dev/sda) together with the right -d
+            # type for each, so ask it rather than guessing.
+            $scanLines = @(& $SmartctlPath '--scan' 2>$null)
+            $targets = @()
+            foreach ($line in $scanLines) {
+                $text = [string]$line
+                if ($text -match '^\s*(\S+)\s+-d\s+(\S+)') {
+                    $targets += [pscustomobject]@{ Device = $Matches[1]; Type = $Matches[2] }
+                }
+                elseif ($text -match '^\s*(/dev/\S+)') {
+                    $targets += [pscustomobject]@{ Device = $Matches[1]; Type = $null }
+                }
+            }
+
+            if ($targets.Count -eq 0) {
+                $out.Note = $(if (Test-IsAdmin) { 'smartctl --scan found no devices' }
+                    else { 'smartctl needs elevation on Windows - re-run via RUN.cmd' })
+                throw 'no smartctl targets'
+            }
+
+            foreach ($t in $targets) {
+                $args = @('-j', '-a')
+                if ($t.Type) { $args += @('-d', $t.Type) }
+                $args += $t.Device
+
+                $raw = & $SmartctlPath @args 2>$null | Out-String
                 $j = $null
-                try { $j = $raw | ConvertFrom-Json } catch { continue }
+                if ($raw) { try { $j = $raw | ConvertFrom-Json } catch { } }
+
+                # No model means the device was never actually read. Emitting a
+                # blank row is how "could not read" becomes indistinguishable
+                # from "nothing wrong".
+                if (-not $j -or -not $j.model_name) {
+                    $err = ''
+                    try { $err = (@($j.smartctl.messages | ForEach-Object { $_.string }) -join '; ') } catch { }
+                    $failures += ($t.Device + ': ' + $(if ($err) { $err } else { 'no data returned' }))
+                    continue
+                }
 
                 $entry = [ordered]@{
                     Model = $j.model_name
@@ -185,10 +232,19 @@ function Get-SmartDetail {
                 catch { }
                 $out.Disks += $entry
             }
-            $out.Status = 'Read'
-            return [pscustomobject]$out
+
+            if ($out.Disks.Count -gt 0) {
+                $out.Status = 'Read'
+                if ($failures.Count -gt 0) { $out.Note = ('some devices unreadable: ' + ($failures -join ' | ')) }
+                return [pscustomobject]$out
+            }
+
+            # Nothing readable at all - fall through to the Windows counters
+            # rather than returning an empty list that reads as a clean bill.
+            $out.Note = $(if (Test-IsAdmin) { 'smartctl could not read any device' }
+                else { 'smartctl needs elevation on Windows - re-run via RUN.cmd' })
         }
-        catch { $out.Status = 'Failed' }
+        catch { $out.Note = $_.Exception.Message }
     }
 
     # Fallback: Windows' own counters. Thin, but better than nothing.

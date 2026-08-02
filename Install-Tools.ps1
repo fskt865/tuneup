@@ -83,9 +83,14 @@ function Find-InstalledExe {
     $cmd = Get-Command $ExeName -ErrorAction SilentlyContinue
     if ($cmd -and $cmd.Source) { return @{ Path = $cmd.Source; Where = 'PATH' } }
 
-    foreach ($base in @(${env:ProgramFiles}, ${env:ProgramFiles(x86)})) {
-        if (-not $base) { continue }
-        $hit = Get-ChildItem -LiteralPath $base -Recurse -File -Filter $ExeName -Depth 3 -ErrorAction SilentlyContinue |
+    # Program Files, then winget's portable-package location. winget installs
+    # some packages (LibreHardwareMonitor among them) under LOCALAPPDATA, so
+    # searching only Program Files reports "MISSING" straight after winget has
+    # said "Successfully installed".
+    $bases = @(${env:ProgramFiles}, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages'))
+    foreach ($base in $bases) {
+        if (-not $base -or -not (Test-Path -LiteralPath $base)) { continue }
+        $hit = Get-ChildItem -LiteralPath $base -Recurse -File -Filter $ExeName -Depth 4 -ErrorAction SilentlyContinue |
             Select-Object -First 1
         if ($hit) { return @{ Path = $hit.FullName; Where = 'installed' } }
     }
@@ -167,27 +172,26 @@ if ($CopyToStick) {
     }
 
     foreach ($p in $Packages) {
-        $copied = $false
-        foreach ($rel in $p.CopyFrom) {
-            foreach ($base in @(${env:ProgramFiles}, ${env:ProgramFiles(x86)})) {
-                if (-not $base) { continue }
-                $src = Join-Path $base $rel
-                if (-not (Test-Path -LiteralPath $src)) { continue }
-
-                $dst = Join-Path $ToolRoot $p.Name
-                if ($PSCmdlet.ShouldProcess($dst, ('Copy ' + $p.Name))) {
-                    if (-not (Test-Path -LiteralPath $dst)) { New-Item -ItemType Directory -Path $dst -Force | Out-Null }
-                    # Copy contents, not the folder: Copy-Item -Recurse onto an
-                    # existing destination nests it one level deeper instead.
-                    Copy-Item -Path (Join-Path $src '*') -Destination $dst -Recurse -Force -ErrorAction SilentlyContinue
-                    Write-Host ('    {0} -> tools\{1}' -f $rel, $p.Name) -ForegroundColor Gray
-                    $copied = $true
-                }
-                break
-            }
-            if ($copied) { break }
+        # Derive the source folder from where the exe actually is, rather than
+        # guessing a path under Program Files. Different packages install to
+        # different places - Program Files, or winget's portable location -
+        # and a hardcoded relative path silently copies nothing.
+        $found = Find-InstalledExe -ExeName $p.Exe
+        if (-not $found -or $found.Where -eq 'stick') {
+            if ($found -and $found.Where -eq 'stick') { Write-Host ('    {0}: already on the stick' -f $p.Name) -ForegroundColor Green }
+            else { Write-Host ('    {0}: not installed, nothing to copy' -f $p.Name) -ForegroundColor Yellow }
+            continue
         }
-        if (-not $copied) { Write-Host ('    {0}: not installed, nothing to copy' -f $p.Name) -ForegroundColor Yellow }
+
+        $src = Split-Path -Parent $found.Path
+        $dst = Join-Path $ToolRoot $p.Name
+        if ($PSCmdlet.ShouldProcess($dst, ('Copy ' + $p.Name))) {
+            if (-not (Test-Path -LiteralPath $dst)) { New-Item -ItemType Directory -Path $dst -Force | Out-Null }
+            # Copy contents, not the folder: Copy-Item -Recurse onto an
+            # existing destination nests it one level deeper instead.
+            Copy-Item -Path (Join-Path $src '*') -Destination $dst -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host ('    {0} -> tools\{1}' -f $src, $p.Name) -ForegroundColor Gray
+        }
     }
 
     # Verify rather than assume.

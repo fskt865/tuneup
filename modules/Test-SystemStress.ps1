@@ -116,7 +116,18 @@ function Convert-DeciKelvinToC {
 function Get-ThermalReading {
     $out = [ordered]@{ Status = 'Unknown'; Source = 'none'; TempC = $null; ZoneCount = 0 }
 
-    $web = @(Get-LhmWebSensors | Where-Object { $_.Group -eq 'Temperatures' -and $_.Value -gt 0 })
+    # Exclude threshold sensors before taking a maximum.
+    #
+    # LHM reports a drive's "Critical Temperature" (82 C) and "Warning
+    # Temperature" (79 C) alongside real readings, and those are CONSTANTS.
+    # Taking the max across the group picked the 82 C limit and reported it as
+    # the machine's temperature - flat from idle to full load, and high enough
+    # to look alarming. The stuck-sensor check caught it, but the reading was
+    # wrong at source.
+    $web = @(Get-LhmWebSensors |
+            Where-Object { $_.Group -eq 'Temperatures' -and $_.Value -gt 0 } |
+            Where-Object { $_.Name -notmatch '(?i)critical|warning|limit|threshold|target|max\b|min\b' })
+
     if ($web.Count -gt 0) {
         $out.Status = 'Read'
         $out.Source = 'LibreHardwareMonitor'
@@ -442,7 +453,9 @@ function Get-FanReadings {
 }
 
 function Get-GpuTemperature {
-    $web = @(Get-LhmWebSensors | Where-Object { $_.Group -eq 'Temperatures' -and $_.Name -match '(?i)gpu' -and $_.Value -gt 0 })
+    $web = @(Get-LhmWebSensors |
+            Where-Object { $_.Group -eq 'Temperatures' -and $_.Name -match '(?i)gpu' -and $_.Value -gt 0 } |
+            Where-Object { $_.Name -notmatch '(?i)critical|warning|limit|threshold|target|max\b|min\b' })
     if ($web.Count -gt 0) { return [math]::Round((($web | Measure-Object -Property Value -Maximum).Maximum), 1) }
 
     try {
@@ -996,7 +1009,10 @@ function Show-CoverageMatrix {
     else {
         Write-Cover 'Cooling' $(if ($tempOk) { 'FULL' } else { 'NONE' }) $(if ($tempOk) { 'temps sampled under load, thermal abort armed' } else { 'no temperature source - the thermal abort CANNOT fire' })
     }
-    Write-Cover 'Fans' $(if ($fanOk) { 'FULL' } else { 'NONE' }) $(if ($fanOk) { 'ramp checked under load' } else { 'no fan sensor - a dead fan would not be detected' })
+    $fanNote = 'no sensor provider - a dead fan would not be detected'
+    if ($fanOk) { $fanNote = 'ramp checked under load' }
+    elseif ($tempOk) { $fanNote = 'machine exposes no fan RPM - a dead fan would not be detected here' }
+    Write-Cover 'Fans' $(if ($fanOk) { 'FULL' } else { 'NONE' }) $fanNote
     Write-Cover 'Storage'  $(if ($smart) { 'FULL' } else { 'PARTIAL' }) $(if ($smart) { 'SMART attributes + read-only surface read' } else { 'Windows counters + surface read; install smartmontools' })
     Write-Cover 'Battery'  'FULL'    'design vs full-charge capacity and cycle count'
     Write-Cover 'Memory'   'NONE'    $(if ($memIso) { "boot $memIso from the stick - several passes" } else { 'get MemTest86+ - nothing in Windows can test RAM the OS is using' })
@@ -1074,7 +1090,15 @@ function Show-StressVerdict {
     # a fan sitting at idle speed while the CPU cooks is a seized fan, and that
     # is a part swap rather than a repaste.
     if ($Result.FanStatus -ne 'Read') {
-        Write-StressLine 'Fans' 'NOT MEASURED' 'needs LibreHardwareMonitor running'
+        # "No provider" and "provider running, machine has no fan sensor" are
+        # different answers. Many laptops keep the fan on the EC where nothing
+        # in userland can see it, and that is not a tooling failure.
+        if ($Result.SensorsUsable) {
+            Write-StressLine 'Fans' 'NOT MEASURED' 'sensors are up, but this machine exposes no fan RPM - check it by ear and by hand'
+        }
+        else {
+            Write-StressLine 'Fans' 'NOT MEASURED' 'no sensor provider running'
+        }
     }
     elseif ($null -eq $Result.PeakFanRpm -or $Result.PeakFanRpm -eq 0) {
         Write-StressLine 'Fans' 'FAIL' '0 rpm throughout a full load run - fan is dead, stuck or unplugged'

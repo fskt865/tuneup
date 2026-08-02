@@ -59,7 +59,14 @@ letter is not the one you had last time.
 5  Full tune-up                     2 then 3 then 4, then report
 6  Dry run of the full tune-up      prints the plan, writes nothing
 7  Purge logs and state from THIS machine
+
+Modules (type the key):
+   bloatware   Bloatware inventory and removal
+   browser     Browser hijack and redirect detection
 ```
+
+From the menu a module **always runs read-only first**, prints what it found,
+and then asks. You have to type `YES` in full before anything changes.
 
 Non-interactive:
 
@@ -67,6 +74,12 @@ Non-interactive:
 .\Invoke-TuneUp.ps1 -Action Report
 .\Invoke-TuneUp.ps1 -Action Full -WhatIf
 .\Invoke-TuneUp.ps1 -Action Repair -SourcePath D:\sources\install.wim
+
+.\Invoke-TuneUp.ps1 -Module bloatware                        # inventory only
+.\Invoke-TuneUp.ps1 -Module bloatware -Apply                 # remove Consumer tier
+.\Invoke-TuneUp.ps1 -Module bloatware -Apply -IncludeOptional -Provisioned
+.\Invoke-TuneUp.ps1 -Module browser                          # detect only
+.\Invoke-TuneUp.ps1 -Module browser -Apply -WhatIf           # show the fix plan
 ```
 
 Default action is `Report`, which changes nothing. That is deliberately what you
@@ -100,6 +113,88 @@ install. That is above the scripted line and the tool says so rather than
 attempting it.
 
 ---
+
+## Modules — the update surface
+
+A module is one `.ps1` in `modules\` with a `MANIFEST` block at the top. Drop
+the file on the stick and it appears in the menu. Nothing else needs editing —
+that is the whole mechanism for adding capability later.
+
+```powershell
+<#MANIFEST
+{
+  "Key": "bloatware",
+  "Title": "Bloatware inventory and removal",
+  "Entry": "Invoke-BloatwareModule",
+  "Order": 10,
+  "RequiresAdmin": true,
+  "Description": "one line for the menu"
+}
+MANIFEST#>
+```
+
+Discovery reads that block with a regex and **does not execute the file**, so
+listing the menu never runs module code and two modules can never collide on
+function names. Only the selected module is dot-sourced, into the calling
+function's scope. Every module must be read-only unless `-Apply` is passed,
+must honour `-WhatIf`, and returns an object that gets folded into the
+sanitized report.
+
+Bump `VERSION` when you change anything. `Deploy-ToUsb.ps1` prints
+`old -> new` so an update in the field says what it replaced instead of
+silently overwriting.
+
+### bloatware
+
+Classifies every installed package into five tiers and removes only the safest:
+
+| Tier | Meaning | Removed? |
+|---|---|---|
+| Consumer | Games, promo tiles, social apps. No system function. | With `-Apply` |
+| Optional | Wanted by some, or holds user data, or load-bearing on some builds. | Needs `-IncludeOptional` too |
+| Protected | Runtimes, store infrastructure, security UI, OEM utilities, antivirus. | Never |
+| SystemComponent | System-signed or `NonRemovable` per Windows itself. | Never |
+| Unclassified | Not in the catalog. | Never |
+
+Classification is by explicit pattern, never heuristic, because "looks like
+bloat" is exactly how you remove the utility that owns a laptop's fan curve.
+**OEM utilities are Protected on purpose** — Lenovo Vantage, Dell Power
+Manager and friends own battery charge thresholds, thermal profiles and Fn-key
+handling. Antivirus is Protected because the customer may be paying for it.
+
+The SystemComponent tier comes from Windows' own `SignatureKind`, not from the
+catalog, and it overrides the catalog in the fail-safe direction. That keeps
+working on builds shipping components this catalog has never seen.
+
+Desktop (non-Store) trialware is **reported with its uninstall string and
+never uninstalled** — those strings are inconsistent and several hang without
+a console. Same rule as partitioning: print the command, let the tech decide.
+
+`-Provisioned` also removes the provisioned copy, without which every new user
+profile gets the junk back.
+
+### browser
+
+Detection is broad, repair is deliberately narrow.
+
+**Fixed** (backed up first, and only with `-Apply`):
+- Browser shortcuts with a URL appended to their arguments — the classic
+  hijack. Legitimate switches like `--profile-directory="Default"` survive.
+- `AutoConfigURL` / `ProxyServer` in Internet Settings — **skipped entirely if
+  the machine is domain-joined**, where those are probably real management.
+
+**Reported, never auto-fixed:** browser policy keys (including
+`ExtensionInstallForcelist`, the strongest single hijack signal), installed
+extensions, hosts file entries, scheduled tasks that launch a browser at a
+URL, and static DNS servers.
+
+Extensions are never removed automatically — telling a hijacker from a
+password manager the customer depends on needs a human, and guessing wrong
+costs them their saved logins. **Browser profiles are never deleted or
+reset**; that is where bookmarks and passwords live.
+
+Only the **host** of a redirect URL is ever recorded, never the full URL,
+because hijack URLs routinely carry a machine-tied id in the query string.
 
 ## Deliberate limits
 
@@ -141,32 +236,55 @@ output directory, populated in the field.
 ## Layout
 
 ```
-RUN.cmd                        launcher: elevation + execution policy
-Invoke-TuneUp.ps1              entry point, menu, report writing
-Deploy-ToUsb.ps1               copy toolkit to removable media
-lib\Common.ps1                 logging, native invocation, state, reboot checks
-lib\Sanitize.ps1               redaction and verification
-tasks\Collect-Report.ps1       read-only diagnostic collection
+RUN.cmd                          launcher: elevation + execution policy
+Invoke-TuneUp.ps1                entry point, menu, report writing
+Deploy-ToUsb.ps1                 copy toolkit to removable media
+VERSION                          bumped on change; deploy reports old -> new
+lib\Common.ps1                   logging, native invocation, state, reboot checks
+lib\Sanitize.ps1                 redaction and verification
+lib\Modules.ps1                  module discovery and dispatch
+tasks\Collect-Report.ps1         read-only diagnostic collection
 tasks\Repair-ComponentStore.ps1  DISM ladder + SFC
 tasks\Invoke-WindowsUpdate.ps1   WU via COM agent
 tasks\Clear-TempFiles.ps1        cache reclamation
-tests\Test-Sanitizer.ps1         redaction test suite
+modules\Remove-Bloatware.ps1     tiered app classification and removal
+modules\Repair-BrowserHijack.ps1 redirect detection, narrow repair
+tests\Run-AllTests.ps1           runs every suite
+tests\Test-Sanitizer.ps1         redaction
+tests\Test-Modules.ps1           discovery + bloatware classification
+tests\Test-BrowserHijack.ps1     shortcut detection and repair
 ```
 
 ---
 
 ## Testing status
 
-Verified on Windows 11 24H2 (26100), PowerShell 5.1:
+Run everything with `tests\Run-AllTests.ps1`. Verified on Windows 11 24H2
+(26100), PowerShell 5.1 — 83 assertions across three suites, all passing:
 
-- Sanitizer suite: 21/21 passing, including live hostname/account/profile-path
-  redaction and an independent leak check of a generated report.
-- `Report` collection, sanitization, write and verification: working.
-- `-WhatIf` dry run of the full ladder: prints the plan, writes no report,
-  still writes its log.
-- Unelevated degradation: marks what it could not read, does not guess.
+- **Sanitizer (21):** live hostname/account/profile-path redaction, synthetic
+  MAC/IPv4/email/user-path/product-key/GUID, nested object graphs, and a
+  verifier that must flag unsanitized text. Plus an independent leak check of
+  a generated report against this machine's real serials.
+- **Modules (41):** discovery, manifest validation, unique keys, and 28
+  classification cases covering runtimes, OEM utilities, antivirus, consumer
+  junk and unknowns — plus a live sweep asserting no System-signed package on
+  this machine is removal-eligible.
+- **Browser (21):** argument splitting, synthetic hijacked shortcut detected
+  and repaired, legitimate switches preserved, query string never recorded,
+  backup written before the fix, clean and non-browser shortcuts untouched.
 
-**Not yet exercised end-to-end:** the elevated write paths - actual
-`RestoreHealth`, `sfc /scannow`, update installation, and cache deletion. Those
-need a bench run on a real machine. Dry-run and refusal paths are tested; the
-destructive halves are not.
+Also verified by hand: `Report` collection and write, `-WhatIf` dry run of the
+full ladder (plan printed, no report written, log still written), unelevated
+degradation, and execution from the stick.
+
+**Not yet exercised end-to-end:** the elevated write paths — actual
+`RestoreHealth`, `sfc /scannow`, update installation, cache deletion, real
+`Remove-AppxPackage`, and the proxy-registry fix. Their dry-run and refusal
+paths are tested; the halves that change a machine are not. Those need a bench
+run before you trust them on a customer's hardware.
+
+Detection on a clean machine proves the detectors run, not that they detect.
+The shortcut path is covered by synthetic fixtures; the proxy, policy,
+scheduled-task and hosts detectors have not been fired against a genuinely
+hijacked machine yet.

@@ -12,6 +12,15 @@ param(
     [ValidateSet('Report', 'Repair', 'Update', 'Clean', 'Full', 'Purge')]
     [string]$Action,
 
+    # Run a drop-in capability module from modules\ by its key.
+    [string]$Module,
+
+    # Modules are read-only without this. Nothing in modules\ changes the
+    # machine unless -Apply is passed explicitly.
+    [switch]$Apply,
+    [switch]$IncludeOptional,
+    [switch]$Provisioned,
+
     [switch]$IncludeDrivers,
     [switch]$IncludeComponentCleanup,
     [string]$SourcePath,
@@ -31,17 +40,25 @@ if (-not $Root) { $Root = Split-Path -Parent $MyInvocation.MyCommand.Path }
 
 . (Join-Path $Root 'lib\Common.ps1')
 . (Join-Path $Root 'lib\Sanitize.ps1')
+. (Join-Path $Root 'lib\Modules.ps1')
 . (Join-Path $Root 'tasks\Collect-Report.ps1')
 . (Join-Path $Root 'tasks\Repair-ComponentStore.ps1')
 . (Join-Path $Root 'tasks\Invoke-WindowsUpdate.ps1')
 . (Join-Path $Root 'tasks\Clear-TempFiles.ps1')
 
 $ReportDir = Join-Path $Root 'reports'
+$ModuleRoot = Join-Path $Root 'modules'
+
+$ToolkitVersion = 'unknown'
+$versionFile = Join-Path $Root 'VERSION'
+if (Test-Path -LiteralPath $versionFile) {
+    $ToolkitVersion = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+}
 
 function Show-Header {
     Clear-Host
     Write-Host ''
-    Write-Host '  TUNE-UP STICK' -ForegroundColor White
+    Write-Host ('  TUNE-UP STICK  v' + $ToolkitVersion) -ForegroundColor White
     Write-Host '  ------------------------------------------------------------' -ForegroundColor DarkGray
     $adminText = 'NOT ELEVATED - repair actions unavailable'
     $adminColor = 'Yellow'
@@ -63,6 +80,14 @@ function Show-Menu {
     Write-Host '   6  Dry run of the full tune-up      (prints the plan, writes nothing)' -ForegroundColor DarkGray
     Write-Host '   7  Purge logs and state from THIS machine' -ForegroundColor DarkGray
     Write-Host ''
+
+    $mods = Get-TuneUpModules -ModuleRoot $ModuleRoot
+    if (@($mods).Count -gt 0) {
+        Write-Host '   Modules (type the key - all run read-only first):' -ForegroundColor Gray
+        Show-ModuleList -Modules $mods
+        Write-Host ''
+    }
+
     Write-Host '   Q  Quit' -ForegroundColor DarkGray
     Write-Host ''
     return (Read-Host '  Select')
@@ -263,6 +288,22 @@ function Invoke-Action {
 
             $results.Report = Get-TuneUpReport -SkipEventLogs:$SkipEventLogs
         }
+        'Module' {
+            $mods = Get-TuneUpModules -ModuleRoot $ModuleRoot
+            $info = @($mods | Where-Object { $_.Key -eq $Module }) | Select-Object -First 1
+            if (-not $info) {
+                $known = (@($mods | ForEach-Object { $_.Key }) -join ', ')
+                if (-not $known) { $known = '(none installed)' }
+                throw ("No module with key '{0}'. Installed: {1}" -f $Module, $known)
+            }
+
+            $opts = @{
+                IncludeOptional = [bool]$IncludeOptional
+                Provisioned     = [bool]$Provisioned
+            }
+            $results.ModuleResult = Invoke-TuneUpModuleByInfo -ModuleInfo $info -Apply:$Apply -Options $opts
+            $results.Report = Get-TuneUpReport -SkipEventLogs:$SkipEventLogs
+        }
         'Purge' {
             Write-Banner 'Purging tune-up traces from this machine'
             Clear-RunState
@@ -285,6 +326,10 @@ function Invoke-Action {
         if ($results.Contains('Repair')) { $merged | Add-Member -NotePropertyName 'RepairOutcome' -NotePropertyValue $results.Repair -Force }
         if ($results.Contains('Update')) { $merged | Add-Member -NotePropertyName 'UpdateOutcome' -NotePropertyValue $results.Update -Force }
         if ($results.Contains('Clean'))  { $merged | Add-Member -NotePropertyName 'CleanOutcome'  -NotePropertyValue $results.Clean  -Force }
+        if ($results.Contains('ModuleResult')) {
+            $merged | Add-Member -NotePropertyName 'ModuleKey' -NotePropertyValue $Module -Force
+            $merged | Add-Member -NotePropertyName 'ModuleOutcome' -NotePropertyValue $results.ModuleResult -Force
+        }
 
         Write-SanitizedReport -Report $merged | Out-Null
     }
@@ -315,7 +360,37 @@ function Invoke-ActionSafely {
     }
 }
 
-if ($Action) {
+# Menu path for modules: always run read-only first, show what was found,
+# then ask. A module never changes anything from the menu without the tech
+# reading the findings and typing yes.
+function Invoke-ModuleFromMenu {
+    param([string]$Key)
+
+    $script:Module = $Key
+    $script:Apply = $false
+    Invoke-ActionSafely -Name 'Module'
+
+    Write-Host ''
+    $answer = Read-Host '  Apply fixes for this module? Type YES to proceed, anything else to skip'
+    if ($answer -cne 'YES') {
+        Write-Host '  Skipped. Nothing was changed.' -ForegroundColor Gray
+        return
+    }
+
+    if (-not (Test-IsAdmin)) {
+        Write-Host '  Cannot apply without elevation. Re-launch with RUN.cmd.' -ForegroundColor Yellow
+        return
+    }
+
+    $script:Apply = $true
+    Invoke-ActionSafely -Name 'Module'
+}
+
+if ($Module) {
+    Show-Header
+    Invoke-ActionSafely -Name 'Module'
+}
+elseif ($Action) {
     Show-Header
     Invoke-ActionSafely -Name $Action
 }
@@ -329,7 +404,12 @@ else {
         '5' { Invoke-ActionSafely -Name 'Full' }
         '6' { $WhatIfPreference = $true; Invoke-ActionSafely -Name 'Full'; $WhatIfPreference = $false }
         '7' { Invoke-ActionSafely -Name 'Purge' }
-        default { Write-Host '  Nothing selected.' -ForegroundColor Gray }
+        default {
+            $mods = Get-TuneUpModules -ModuleRoot $ModuleRoot
+            $hit = @($mods | Where-Object { $_.Key -eq $choice }) | Select-Object -First 1
+            if ($hit) { Invoke-ModuleFromMenu -Key $hit.Key }
+            else { Write-Host '  Nothing selected.' -ForegroundColor Gray }
+        }
     }
 }
 
@@ -337,4 +417,6 @@ Write-Host ''
 Write-Host ('  Verbose log: ' + $script:LogPath) -ForegroundColor DarkGray
 Write-Host '  That log stays on this machine. Option 7 purges it when the job is done.' -ForegroundColor DarkGray
 Write-Host ''
-if (-not $Action) { Read-Host '  Press Enter to close' | Out-Null }
+# Only pause when we actually came through the menu. A non-interactive run
+# (-Action or -Module) has no stdin, and Read-Host there fails the whole script.
+if (-not $Action -and -not $Module) { Read-Host '  Press Enter to close' | Out-Null }

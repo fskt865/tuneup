@@ -433,6 +433,34 @@ These are finished decisions, not gaps:
 
 ---
 
+## The stick
+
+Ventoy (GPLv3) owns the whole device — it repartitions and cannot be installed
+alongside existing data, so the stick is always rebuilt from this repo rather
+than edited in place. That is what `Deploy-ToUsb.ps1` is for.
+
+```
+D:\  exFAT, ~14.4 GB          Ventoy data partition
+     iso\
+         memtest86plus-8.10.iso    boots from Ventoy's menu
+     tuneup\                        the toolkit; not an ISO, so invisible to the menu
+         tools\                     smartmontools, LibreHardwareMonitor, CrystalDiskInfo
+VTOYEFI  ~32 MB, hidden        Ventoy's own boot files
+```
+
+ISOs and ordinary files coexist on the same partition — Ventoy only lists
+`.iso`/`.img` in its boot menu and ignores everything else. Installed MBR, not
+GPT, so it boots legacy BIOS as well as UEFI; and with Secure Boot Support on,
+so it boots machines with Secure Boot enabled without going into their
+firmware to disable it.
+
+exFAT rather than FAT32 means no 4 GB per-file limit, so full Windows install
+ISOs fit.
+
+**Memory testing now lives here.** Boot the stick, pick MemTest86+, give it
+several passes. That is the component the `stress` module deliberately refuses
+to test from inside Windows.
+
 ## Deploying to a stick
 
 ```powershell

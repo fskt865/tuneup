@@ -18,7 +18,7 @@ every stick, put it here on the machine you deploy from.
 |---|---|---|
 | Prime95 | CPU load, heat soak | `Small FFTs` for maximum heat |
 | OCCT | CPU/GPU/PSU load | Has a free personal-use build |
-| MemTest86 | Memory | Bootable — belongs on a Ventoy partition, not here |
+| MemTest86+ | Memory | Bootable — already on the stick at `\iso\`, not here |
 | CrystalDiskInfo | SMART, portable | Reads more attributes than `Get-StorageReliabilityCounter` |
 | HWiNFO64 | Sensors | Best option when a machine exposes no ACPI thermal zone |
 | FurMark | GPU load | Genuinely stresses a marginal GPU or PSU |

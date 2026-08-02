@@ -244,6 +244,20 @@ genuinely bad on a customer's machine.
 
 **Closes:** the `-Apply` load path and the `finally` cleanup.
 
+### 11b. Memory — MemTest86+
+
+Now possible: the stick is a Ventoy device with the image on it.
+
+Boot the target from the stick, choose `memtest86plus-8.10.iso` from Ventoy's
+menu, and let it run **several passes** — a single pass misses intermittent
+faults, which are the ones that produce "random" crashes.
+
+This is the only real memory test available. The `stress` module reports
+Memory as `NOT TESTED` by design and will keep doing so; nothing running
+inside Windows can test RAM the OS is already using.
+
+**Closes:** the one component the toolkit cannot cover from inside Windows.
+
 ### 12. Network — disruptive
 
 Reboot required afterwards; the stack reset returns the machine to DHCP.

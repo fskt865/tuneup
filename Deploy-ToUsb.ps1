@@ -122,7 +122,10 @@ $items = @(
     @{ Src = 'modules';           Dst = 'modules' },
     # Shipped deliberately: lets you verify redaction ON the customer's machine
     # before trusting a report off it, rather than taking the tool's word.
-    @{ Src = 'tests';             Dst = 'tests' }
+    @{ Src = 'tests';             Dst = 'tests' },
+    # Third-party utilities, whatever the tech has put there locally. Not in
+    # git; copied to the stick if present.
+    @{ Src = 'tools';             Dst = 'tools' }
 )
 
 foreach ($i in $items) {

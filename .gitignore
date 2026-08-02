@@ -7,3 +7,9 @@ reports/
 
 # Local run state, if anyone ever runs the toolkit straight out of the repo.
 state.json
+
+# Third-party stress and diagnostic utilities. Most do not permit
+# redistribution, they are large and freely re-downloadable, and vendor
+# binaries do not belong in a repo. The README explaining the folder stays.
+tools/*
+!tools/README.md

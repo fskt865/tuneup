@@ -148,7 +148,14 @@ function Protect-Object {
     if ($InputObject -is [System.Collections.IEnumerable]) {
         $list = @()
         foreach ($item in $InputObject) { $list += , (Protect-Object -InputObject $item -Depth ($Depth + 1)) }
-        return $list
+
+        # The leading comma is load-bearing. PowerShell unrolls arrays on
+        # return, so a plain `return $list` hands back nothing for an empty
+        # list and a bare scalar for a single-item one - which serialize as
+        # {} and as an object instead of [] and [ {...} ]. A report with one
+        # finding would then have a different shape from one with two, and
+        # anything parsing it downstream breaks on the boundary case.
+        return , $list
     }
 
     if ($InputObject -is [psobject] -and $InputObject.PSObject.Properties.Count -gt 0) {

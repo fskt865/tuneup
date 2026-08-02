@@ -99,6 +99,24 @@ Assert-True 'Object graph: numbers preserved'    ($json -match '42')
 Assert-True 'Object graph: booleans preserved'   ($json -match 'true')
 Assert-True 'Object graph: harmless text kept'   ($json -match 'harmless string')
 
+# List shape must survive the round trip at the 0 and 1 boundaries, or a
+# report with a single finding parses differently from one with two.
+$shapes = [pscustomobject]@{
+    EmptyList  = @()
+    SingleList = @('one')
+    MultiList  = @('one', 'two')
+}
+$shapeJson = Protect-Object -InputObject $shapes | ConvertTo-Json -Depth 6
+Assert-True 'Empty list serializes as []'       ($shapeJson -match '"EmptyList"\s*:\s*\[\s*\]')
+Assert-True 'Single-item list stays an array'   ($shapeJson -match '(?s)"SingleList"\s*:\s*\[')
+Assert-True 'Multi-item list stays an array'    ($shapeJson -match '(?s)"MultiList"\s*:\s*\[')
+
+$shapeBack = $shapeJson | ConvertFrom-Json
+Assert-True 'Single-item list round-trips to 1 element' (@($shapeBack.SingleList).Count -eq 1) `
+("count=" + @($shapeBack.SingleList).Count)
+Assert-True 'Empty list round-trips to 0 elements'      (@($shapeBack.EmptyList).Count -eq 0) `
+("count=" + @($shapeBack.EmptyList).Count)
+
 # --- Verifier must actually catch a leak -------------------------------
 $dirty = "Machine $env:COMPUTERNAME at 10.20.30.40"
 $verdictDirty = Test-SanitizedText -Text $dirty

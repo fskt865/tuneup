@@ -67,6 +67,8 @@ Modules (type the key):
    bloatware   Bloatware inventory and removal
    startup     Startup item inventory and control
    browser     Browser hijack and redirect detection
+   driver      Driver problem and rollback assistant
+   stress      Load and stability testing
 ```
 
 From the menu a module **always runs read-only first**, prints what it found,
@@ -87,6 +89,11 @@ Non-interactive:
 .\Invoke-TuneUp.ps1 -Module startup -Apply -Restore          # undo all of the above
 .\Invoke-TuneUp.ps1 -Module browser                          # detect only
 .\Invoke-TuneUp.ps1 -Module browser -Apply -WhatIf           # show the fix plan
+.\Invoke-TuneUp.ps1 -Module driver                           # diagnose only
+.\Invoke-TuneUp.ps1 -Module driver -Apply                    # only creates a restore point
+.\Invoke-TuneUp.ps1 -Module stress                           # preflight, no load
+.\Invoke-TuneUp.ps1 -Module stress -Apply -Minutes 10        # sustained load with telemetry
+.\Invoke-TuneUp.ps1 -Module stress -Apply -MaxTempC 90       # lower the abort threshold
 ```
 
 Default action is `Report`, which changes nothing. That is deliberately what you
@@ -235,6 +242,82 @@ reset**; that is where bookmarks and passwords live.
 Only the **host** of a redirect URL is ever recorded, never the full URL,
 because hijack URLs routinely carry a machine-tied id in the query string.
 
+### driver
+
+**This module does not roll back drivers**, and that is a finished decision.
+
+Windows has no supported scripted rollback — Device Manager's "Roll Back
+Driver" calls SetupAPI with the retained previous package, and there is no
+`pnputil` verb or cmdlet for it. Everything a script *can* do is blunter:
+delete a driver package outright and hope the next best driver binds. The
+blast radius is the worst in the toolkit — delete the wrong storage package
+and the machine will not boot (`0x7B`); delete the display package and you
+have a black screen with no way back.
+
+So it diagnoses, identifies candidates, and **prints the exact commands** in
+safest-first order (Device Manager rollback → System Restore → `pnputil
+/delete-driver`). Same rule as partition layout in `bootrepair`: the judgement
+is not automatable and the downside is someone's machine.
+
+What it reports:
+
+- **Devices with an actual fault**, with the problem code decoded into *which
+  layer to go look at* — code 43 means the device stopped itself and is often
+  failing hardware; code 28 means no driver; code 31 means the driver failed
+  to load. `Status <> OK` is deliberately **not** treated as a fault: Windows
+  reports `Unknown` for hidden and unqueryable devices, which on a healthy
+  machine is dozens of entries. The count filtered is always printed, so a
+  shorter list never looks like a cleaner machine.
+- **Third-party driver packages**, flagged `BootCritical` / `HighRisk` /
+  `Standard`. Boot-critical comes from Windows' own `BootCritical` flag first,
+  with a device-class list as a belt-and-braces overlay.
+- **System Restore state** — and if it cannot tell whether protection is off
+  or simply empty, it says so rather than guessing.
+
+`-Apply` does exactly one thing: creates a System Restore point. That is
+additive and is the safety net you want before doing any of this by hand. If
+Windows throttles it (one per 24h by default) the module says the point was
+**not** created rather than implying a net exists.
+
+Device instance IDs go to the console only, never the report — they routinely
+embed hardware serials (`USB\VID_xxxx&PID_xxxx\<serial>`).
+
+### stress
+
+Not a benchmark. The point is reproducing *"it shuts off when it gets warm"*
+or *"it crawls after ten minutes"* on the bench, with the telemetry that says
+which layer failed — thermal, firmware throttle, or power.
+
+**The interlock that matters: it refuses to run when a disk is not reporting
+healthy.** Stressing a machine with a dying drive risks the data you should be
+recovering first. Image it, get the data off, then test hardware. `-Force`
+overrides it and the tool states plainly what is being overridden.
+
+Applies load across every logical core and samples temperature and
+`% Processor Performance` — the latter is the useful one, because sustained
+running *below* base clock is the signature of throttling. Afterwards it
+counts `Kernel-Processor-Power` ID 37 events, which is the firmware saying in
+its own words that it limited the CPU.
+
+Aborts automatically above `-MaxTempC` (default 95). Where a machine exposes
+no ACPI thermal zone — common on laptops — it says so and warns that the
+thermal abort will not work, rather than running blind and implying safety.
+Duration defaults to 2 minutes and is hard-capped at 30.
+
+Load workers are stopped in a `finally` block, so Ctrl-C, an abort or an error
+all shut them down. Leaving CPU-pegging jobs behind on a customer's machine is
+not an acceptable failure mode.
+
+**No disk write tests, ever.** A throughput benchmark that writes to a
+customer's volume is not worth the risk. Memory test (`mdsched.exe`) and
+surface scans (`chkdsk /scan`, `/r`) need a reboot or hours, so the module
+prints the commands instead of running them.
+
+Third-party tools go in `tools\` on the stick — see `tools\README.md`. The
+module lists what it finds and does not launch anything. **No vendor binaries
+are in git**: most disallow redistribution, they are large and freely
+re-downloadable, and a repo is the wrong place for them.
+
 ## Deliberate limits
 
 These are finished decisions, not gaps:
@@ -289,11 +372,16 @@ tasks\Clear-TempFiles.ps1        cache reclamation
 modules\Remove-Bloatware.ps1     tiered app classification and removal
 modules\Manage-StartupItems.ps1  startup inventory, reversible disable
 modules\Repair-BrowserHijack.ps1 redirect detection, narrow repair
+modules\Repair-DriverRollback.ps1 device faults, rollback guidance
+modules\Test-SystemStress.ps1    load testing with thermal telemetry
+tools\                           third-party utilities (gitignored)
 tests\Run-AllTests.ps1           runs every suite
 tests\Test-Sanitizer.ps1         redaction
 tests\Test-Modules.ps1           discovery + bloatware classification
 tests\Test-BrowserHijack.ps1     shortcut detection and repair
 tests\Test-Startup.ps1           StartupApproved encoding + classification
+tests\Test-Driver.ps1            problem codes + boot-critical risk tiers
+tests\Test-Stress.ps1            temp conversion, caps, safety interlocks
 ```
 
 ---
@@ -301,14 +389,15 @@ tests\Test-Startup.ps1           StartupApproved encoding + classification
 ## Testing status
 
 Run everything with `tests\Run-AllTests.ps1`. Verified on Windows 11 24H2
-(26100), PowerShell 5.1 — 130 assertions across four suites, all passing:
+(26100), PowerShell 5.1 — 207 assertions across six suites, all passing:
 
-- **Sanitizer (24):** live hostname/account/profile-path redaction, synthetic
+- **Sanitizer (29):** live hostname/account/profile-path redaction, synthetic
   MAC/IPv4/email/user-path/product-key/GUID/SID, nested object graphs, a
-  verifier that must flag unsanitized text, and a check that well-known SIDs
-  are *not* redacted. Plus an independent leak check of a generated report
-  against this machine's real serials.
-- **Modules (44):** discovery, manifest validation, unique keys, and 28
+  verifier that must flag unsanitized text, a check that well-known SIDs are
+  *not* redacted, and list-shape round trips at the 0 and 1 boundaries. Plus
+  an independent leak check of a generated report against this machine's real
+  serials.
+- **Modules (47):** discovery, manifest validation, unique keys, and 28
   classification cases covering runtimes, OEM utilities, antivirus, consumer
   junk and unknowns — plus a live sweep asserting no System-signed package on
   this machine is removal-eligible.
@@ -324,12 +413,21 @@ Also verified by hand: `Report` collection and write, `-WhatIf` dry run of the
 full ladder (plan printed, no report written, log still written), unelevated
 degradation, and execution from the stick.
 
+- **Driver (40):** problem-code decoding, boot-critical class list, risk tiers
+  including Windows' own flag beating the class list, an invariant that no
+  boot-critical or high-risk class reads as Standard, and confirmation that
+  `Status <> OK` devices with no fault code are excluded.
+- **Stress (26):** deci-Kelvin conversion at four reference points, duration
+  caps, preflight proven read-only by elapsed time, disk-health interlock
+  shape, sensor status honesty, and tool discovery listing executables only.
+
 **Not yet exercised end-to-end:** the elevated write paths — actual
 `RestoreHealth`, `sfc /scannow`, update installation, cache deletion, real
-`Remove-AppxPackage`, the proxy-registry fix, and a real startup
-disable/restore cycle against live `StartupApproved` keys. Their dry-run and
-refusal paths are tested; the halves that change a machine are not. Those need
-a bench run before you trust them on a customer's hardware.
+`Remove-AppxPackage`, the proxy-registry fix, a real startup disable/restore
+cycle against live `StartupApproved` keys, `Checkpoint-Computer`, and an
+actual `-Apply` load run. Their dry-run, preflight and refusal paths are
+tested; the halves that change or load a machine are not. Those need a bench
+run before you trust them on a customer's hardware.
 
 Detection on a clean machine proves the detectors run, not that they detect.
 The shortcut path is covered by synthetic fixtures; the proxy, policy,

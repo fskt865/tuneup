@@ -24,6 +24,12 @@ param(
     # Undo: re-enable everything the startup module disabled on this machine.
     [switch]$Restore,
 
+    # Load testing (stress module).
+    [int]$Minutes,
+    [int]$MaxTempC,
+    [int]$Threads,
+    [switch]$Force,
+
     [switch]$IncludeDrivers,
     [switch]$IncludeComponentCleanup,
     [string]$SourcePath,
@@ -314,7 +320,13 @@ function Invoke-Action {
                 IncludeOptional = [bool]$IncludeOptional
                 Provisioned     = [bool]$Provisioned
                 Restore         = [bool]$Restore
+                Force           = [bool]$Force
             }
+            # Only pass numeric options through when actually supplied, so a
+            # module keeps its own default instead of receiving 0.
+            if ($PSBoundParameters.ContainsKey('Minutes'))  { $opts['Minutes'] = $Minutes }
+            if ($PSBoundParameters.ContainsKey('MaxTempC')) { $opts['MaxTempC'] = $MaxTempC }
+            if ($PSBoundParameters.ContainsKey('Threads'))  { $opts['Threads'] = $Threads }
             $results.ModuleResult = Invoke-TuneUpModuleByInfo -ModuleInfo $info -Apply:$Apply -Options $opts
             $results.Report = Get-TuneUpReport -SkipEventLogs:$SkipEventLogs
         }

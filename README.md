@@ -70,6 +70,8 @@ Modules (type the key):
    driver      Driver problem and rollback assistant
    stress      Load and stability testing
    network     Network diagnosis and repair
+   clocks      Clock and power-state review
+   crashes     Crash report review
 ```
 
 From the menu a module **always runs read-only first**, prints what it found,
@@ -294,6 +296,59 @@ Addresses and MACs are classified, never recorded — the report says `APIPA`,
 `static`, `gateway reachable`, which is the diagnostic content and survives
 redaction intact.
 
+### crashes
+
+**Read-only, always — there is no `-Apply` and there should never be one.**
+Crash artefacts are the only record of an intermittent fault; deleting them
+destroys the evidence.
+
+The point is the **faulting module**. "It crashes sometimes" isn't actionable;
+"eleven crashes, all in `nvlddmkm.sys`" names the display driver, and
+"bugcheck `0x7A` twice" names the disk.
+
+Covers:
+
+- **Kernel dumps** — `Minidump\`, `MEMORY.DMP`, `LiveKernelReports\`. The stop
+  code is read straight out of the dump header (`DUMP_HEADER64`, offset
+  `0x38`), so you get `0x116 VIDEO_TDR_ERROR -> GPU` **without WinDbg or a
+  symbol download**. 22 stop codes are mapped to a component.
+- **WER** app crashes and hangs, machine-wide and per-user. The folder *name*
+  carries type and app and is readable unelevated; faulting module and
+  exception code need elevation, and it says so rather than showing blanks.
+- **Third-party crash stores** — Chrome/Edge/Brave Crashpad, Firefox,
+  Thunderbird, Discord, Slack, VS Code, Steam, NVIDIA, Office, and Java
+  `hs_err_pid*.log`.
+- **Reliability Monitor's** own dataset for a chronological view.
+
+> **A kernel dump is a copy of RAM.** It can contain documents, passwords and
+> keys. This module records app names, module names, stop codes, counts and
+> dates — never file contents, paths or dumps. It will not copy a dump
+> anywhere, and neither should you.
+
+### clocks
+
+Two different faults look identical to a customer ("it got slow"), and this
+tells them apart:
+
+- **Underclocked** — most often the power plan's *maximum processor state*. A
+  single number that makes a healthy laptop feel broken, and it is checked
+  first because it is free to fix. Also RAM at JEDEC default because XMP/EXPO
+  was never enabled.
+- **Overclocked** — on a machine that crashes under load, undo this *before*
+  spending an hour on drivers or RAM. An unstable memory overclock imitates
+  failing RAM exactly.
+
+Reads rated vs running CPU clock and `% Processor Performance`, the power
+plan's min/max processor state on **both AC and battery**, per-DIMM rated vs
+configured speed, and live per-core/GPU clocks if LibreHardwareMonitor happens
+to be running (it is not started here — this module changes nothing).
+
+Power settings are read by **GUID rather than friendly name**, so it works on
+non-English Windows where `powercfg` output is localised.
+
+Read-only. A capped CPU or an overclock is the owner's configuration, so it
+prints the `powercfg` command and stops.
+
 ### driver
 
 **This module does not roll back drivers**, and that is a finished decision.
@@ -307,7 +362,7 @@ and the machine will not boot (`0x7B`); delete the display package and you
 have a black screen with no way back.
 
 So it diagnoses, identifies candidates, and **prints the exact commands** in
-safest-first order (Device Manager rollback → System Restore → `pnputil
+safest-first order (Device Manager rollback — System Restore — `pnputil
 /delete-driver`). Same rule as partition layout in `bootrepair`: the judgement
 is not automatable and the downside is someone's machine.
 
@@ -495,6 +550,8 @@ modules\Repair-BrowserHijack.ps1 redirect detection, narrow repair
 modules\Repair-DriverRollback.ps1 device faults, rollback guidance
 modules\Test-SystemStress.ps1    load testing with thermal telemetry
 modules\Repair-Network.ps1       connectivity ladder, tiered repairs
+modules\Get-CrashReports.ps1     kernel dumps, WER, third-party crash stores
+modules\Get-ClockStatus.ps1      rated vs running clocks, power-state caps
 tools\                           third-party utilities (gitignored)
 tests\Run-AllTests.ps1           runs every suite
 tests\Test-Sanitizer.ps1         redaction
@@ -504,6 +561,7 @@ tests\Test-Startup.ps1           StartupApproved encoding + classification
 tests\Test-Driver.ps1            problem codes + boot-critical risk tiers
 tests\Test-Stress.ps1            temp conversion, caps, safety interlocks
 tests\Test-Network.ps1           address classification, ladder logic
+tests\Test-Crashes.ps1           bugcheck decode, dump header, WER names, clocks
 ```
 
 ---
@@ -511,7 +569,7 @@ tests\Test-Network.ps1           address classification, ladder logic
 ## Testing status
 
 Run everything with `tests\Run-AllTests.ps1`. Verified on Windows 11 24H2
-(26100), PowerShell 5.1 — 238 assertions across seven suites, all passing:
+(26100), PowerShell 5.1 — 307 assertions across eight suites, all passing:
 
 - **Sanitizer (29):** live hostname/account/profile-path redaction, synthetic
   MAC/IPv4/email/user-path/product-key/GUID/SID, nested object graphs, a
@@ -593,3 +651,4 @@ Detection on a clean machine proves the detectors run, not that they detect.
 The shortcut path is covered by synthetic fixtures; the proxy, policy,
 scheduled-task and hosts detectors have not been fired against a genuinely
 hijacked machine yet.
+

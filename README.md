@@ -99,7 +99,7 @@ Non-interactive:
 .\Invoke-TuneUp.ps1 -Module stress -Apply -MaxTempC 90       # lower the abort threshold
 .\Invoke-TuneUp.ps1 -Module network                          # walk the ladder, change nothing
 .\Invoke-TuneUp.ps1 -Module network -Apply                   # safe repairs only
-.\Invoke-TuneUp.ps1 -Module network -Apply -Disruptive       # + winsock / stack reset (reboot)
+.\Invoke-TuneUp.ps1 -Module network -Apply -Disruptive       # DISABLED - saves config, prints commands
 ```
 
 Default action is `Report`, which changes nothing. That is deliberately what you
@@ -281,13 +281,26 @@ Repairs are tiered by blast radius:
 | Tier | Actions | Cost |
 |---|---|---|
 | Safe (`-Apply`) | flush DNS, clear ARP/NetBIOS, DHCP release+renew | brief drop |
-| Disruptive (`-Disruptive`) | `netsh winsock reset`, `netsh int ip reset` | **reboot, and the stack reset wipes static IP config** |
+| Disruptive (`-Disruptive`) | `netsh winsock reset`, `netsh int ip reset` | **DISABLED — see below** |
 
-Disruptive is opt-in and writes the full IP configuration to a local file
-first. A machine with a static address is usually static for a reason — a
-printer, a line-of-business host, a site with no DHCP — and handing it back on
-DHCP is a fault you introduced. DHCP release/renew is skipped automatically on
-a static machine, since it only muddies the picture.
+> **The disruptive resets are switched off in this build.** They have never
+> been executed end to end, they need a reboot, and the stack reset wipes
+> static IP configuration — so a customer's machine is the wrong place for
+> their first run.
+>
+> `-Disruptive` still does the useful half: it saves the full IP configuration
+> to a local file and prints the exact commands, so a tech can run them by
+> hand having seen what is at stake. Same rule as partitioning in
+> `bootrepair` — print the commands, let the tech decide.
+>
+> Re-enable via `$script:DisruptiveEnabled` in `modules\Repair-Network.ps1`
+> once Tier C of `BENCH-CHECKLIST.md` has passed on a scratch machine. A test
+> asserts it is off, so it cannot come back silently.
+
+A machine with a static address is usually static for a reason — a printer, a
+line-of-business host, a site with no DHCP — and handing it back on DHCP is a
+fault you introduced. DHCP release/renew is skipped automatically on a static
+machine, since it only muddies the picture.
 
 Proxy, hosts entries, disabled firewall profiles and domain membership are
 reported as context, never changed. Firewall rules are never touched.
@@ -569,7 +582,7 @@ tests\Test-Crashes.ps1           bugcheck decode, dump header, WER names, clocks
 ## Testing status
 
 Run everything with `tests\Run-AllTests.ps1`. Verified on Windows 11 24H2
-(26100), PowerShell 5.1 — 307 assertions across eight suites, all passing:
+(26100), PowerShell 5.1 — 308 assertions across eight suites, all passing:
 
 - **Sanitizer (29):** live hostname/account/profile-path redaction, synthetic
   MAC/IPv4/email/user-path/product-key/GUID/SID, nested object graphs, a

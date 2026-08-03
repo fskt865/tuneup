@@ -43,6 +43,11 @@ MANIFEST#>
 # "APIPA", "gateway reachable" - which is the diagnostic content - and never
 # an IP or MAC, both of which would be redacted into uselessness anyway.
 
+# Master switch for the winsock / TCP-IP stack resets. OFF until Tier C of
+# BENCH-CHECKLIST.md has been run on a scratch machine - see the long comment
+# at the point of use.
+$script:DisruptiveEnabled = $false
+
 $script:ConnectTestUrl = 'http://www.msftconnecttest.com/connecttest.txt'
 $script:ConnectTestBody = 'Microsoft Connect Test'
 $script:ConnectTestName = 'www.msftconnecttest.com'
@@ -395,8 +400,15 @@ function Invoke-NetworkModule {
         Write-Host ''
         Write-Host '  Diagnosis only. Nothing was changed.' -ForegroundColor Cyan
         Write-Host '  -Apply runs the SAFE repairs: flush DNS, clear ARP/NetBIOS, DHCP renew.' -ForegroundColor Cyan
-        Write-Host '  -Apply -Disruptive adds winsock and TCP/IP stack resets. Both need a' -ForegroundColor Cyan
-        Write-Host '  reboot, and the stack reset WIPES STATIC IP CONFIGURATION.' -ForegroundColor Cyan
+        if ($script:DisruptiveEnabled) {
+            Write-Host '  -Apply -Disruptive adds winsock and TCP/IP stack resets. Both need a' -ForegroundColor Cyan
+            Write-Host '  reboot, and the stack reset WIPES STATIC IP CONFIGURATION.' -ForegroundColor Cyan
+        }
+        else {
+            Write-Host '  The winsock and TCP/IP stack resets are DISABLED in this build until' -ForegroundColor DarkGray
+            Write-Host '  they have been verified on a scratch machine. -Disruptive will save the' -ForegroundColor DarkGray
+            Write-Host '  IP configuration and print the commands rather than running them.' -ForegroundColor DarkGray
+        }
         Write-Host ''
         return [pscustomobject]$result
     }
@@ -434,8 +446,54 @@ function Invoke-NetworkModule {
     if (-not $disruptive) {
         Write-Host ''
         Write-Host '  Safe repairs done. Winsock and TCP/IP stack resets NOT run.' -ForegroundColor Cyan
-        Write-Host '  Re-test first - those two need a reboot and the stack reset wipes' -ForegroundColor Cyan
-        Write-Host '  static IP configuration. Add -Disruptive only if you still need them.' -ForegroundColor Cyan
+        Write-Host '  Re-test connectivity now - a reset that was not needed is a reboot and a' -ForegroundColor Cyan
+        Write-Host '  wiped static configuration for nothing.' -ForegroundColor Cyan
+        Write-Host ''
+        return [pscustomobject]$result
+    }
+
+    # ---------------------------------------------------------------------
+    # DISABLED PENDING BENCH VERIFICATION.
+    #
+    # winsock reset and int ip reset have never been executed - only their
+    # dry-run and refusal paths are tested. They need a reboot, and the stack
+    # reset wipes static IP configuration, so the first real run must not be
+    # on a machine someone is waiting for.
+    #
+    # Disabled rather than deleted, and it still does the useful half: the IP
+    # configuration is captured, and the exact commands are printed so a tech
+    # can run them by hand having seen what is at stake. Same shape as the
+    # partitioning rule - print the commands, let the tech decide.
+    #
+    # To re-enable after Tier C of BENCH-CHECKLIST.md passes on a scratch
+    # machine, set this to $true. Do not flip it because a job is in a hurry.
+    # ---------------------------------------------------------------------
+    if (-not $script:DisruptiveEnabled) {
+        Write-Banner 'Disruptive repairs - DISABLED'
+
+        $result.BackupFile = Backup-IpConfiguration
+        $result.AbortReason = 'DisruptiveDisabled'
+
+        Write-Host '  These are switched off in this build. They have never been run end to' -ForegroundColor Yellow
+        Write-Host '  end, they need a reboot, and the stack reset WIPES STATIC IP SETTINGS -' -ForegroundColor Yellow
+        Write-Host '  so a customer machine is the wrong place for their first execution.' -ForegroundColor Yellow
+        Write-Host ''
+        Write-Host ('  Current IP configuration saved to {0}' -f $result.BackupFile) -ForegroundColor Green
+        Write-Host '  Read it before re-entering anything by hand.' -ForegroundColor DarkGray
+
+        if ($rungs[1].Detail -like '*Static*') {
+            Write-Host ''
+            Write-Host '  NOTE: this machine has a STATIC address. A stack reset would put it' -ForegroundColor Red
+            Write-Host '  back on DHCP and the settings would be gone.' -ForegroundColor Red
+        }
+
+        Write-Host ''
+        Write-Host '  To do it by hand, elevated, then REBOOT:' -ForegroundColor Cyan
+        Write-Host '    netsh winsock reset' -ForegroundColor Gray
+        Write-Host '    netsh int ip reset' -ForegroundColor Gray
+        Write-Host ''
+        Write-Host '  Re-enable in modules\Repair-Network.ps1 once Tier C of the bench' -ForegroundColor DarkGray
+        Write-Host '  checklist has passed on a scratch machine.' -ForegroundColor DarkGray
         Write-Host ''
         return [pscustomobject]$result
     }

@@ -121,6 +121,16 @@ $portal = @(
 Assert-True 'Captive-portal shape reports http' ((Get-FailedLayer -Rungs $portal).Layer -eq 'http')
 
 Write-Host ''
+Write-Host '  Disruptive resets are gated off' -ForegroundColor Cyan
+Write-Host '  ------------------------------' -ForegroundColor DarkGray
+
+# winsock reset and int ip reset have never been run end to end, need a reboot,
+# and the stack reset wipes static IP configuration. They stay off until Tier C
+# of the bench checklist passes on a scratch machine. If this fails, someone
+# re-enabled them - confirm that was deliberate and that they were verified.
+Assert-True 'Disruptive network resets are disabled' (-not $script:DisruptiveEnabled)
+
+Write-Host ''
 Write-Host '  Snapshot is read-only' -ForegroundColor Cyan
 Write-Host '  ---------------------' -ForegroundColor DarkGray
 

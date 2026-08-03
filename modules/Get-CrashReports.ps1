@@ -213,11 +213,35 @@ function Get-WerReports {
                 if ($wer) {
                     # Only three fields are taken. The rest of a .wer holds full
                     # paths and command lines and is deliberately not read out.
+                    # WER labels its own signature fields, so read the labels
+                    # rather than guessing by position or by file extension.
+                    #
+                    # An earlier version took any Sig value ending in .exe as
+                    # the faulting module. In WER's APPCRASH schema Sig[0] is
+                    # the APPLICATION, so that reported the crashing program as
+                    # its own culprit - and for an AppHang there is no faulting
+                    # module at all, because a hung thread never raised an
+                    # exception. Inventing one there is worse than reporting
+                    # none.
+                    $sigNames = @{}
+                    $sigValues = @{}
                     foreach ($line in (Get-Content -LiteralPath $wer.FullName -ErrorAction Stop)) {
-                        if ($line -match '^Sig\[\d+\]\.Value=(.+)$' -and -not $modName -and $line -match '\.(dll|sys|exe|ocx)\s*$') { $modName = $Matches[1].Trim() }
-                        if ($line -match '^ModName=(.+)$') { $modName = $Matches[1].Trim() }
-                        if ($line -match '^ExceptionCode=(.+)$') { $exception = $Matches[1].Trim() }
+                        if ($line -match '^Sig\[(\d+)\]\.Name=(.*)$') { $sigNames[$Matches[1]] = $Matches[2].Trim(); continue }
+                        if ($line -match '^Sig\[(\d+)\]\.Value=(.*)$') { $sigValues[$Matches[1]] = $Matches[2].Trim(); continue }
+                        if ($line -match '^ModName=(.+)$') { $modName = $Matches[1].Trim(); continue }
+                        if ($line -match '^ExceptionCode=(.+)$') { $exception = $Matches[1].Trim(); continue }
                     }
+
+                    foreach ($idx in $sigNames.Keys) {
+                        switch -Regex ($sigNames[$idx]) {
+                            '^Fault Module Name$' { if (-not $modName) { $modName = $sigValues[$idx] } }
+                            '^Exception Code$' { if (-not $exception) { $exception = $sigValues[$idx] } }
+                        }
+                    }
+
+                    # A module name that is just the application again carries
+                    # no information and must not be presented as a culprit.
+                    if ($modName -and $app -and $modName -eq $app) { $modName = $null }
                 }
             }
             catch { $out.Denied++ }
@@ -384,6 +408,18 @@ function Invoke-CrashModule {
             Write-Host ''
             Write-Host '    Faulting module names need elevation - re-run via RUN.cmd.' -ForegroundColor Yellow
             Write-Host '    Without them you have which app died, but not what killed it.' -ForegroundColor Yellow
+        }
+        else {
+            # Elevated and still nothing: that is a real answer, not a failure.
+            $hangs = @($reports | Where-Object { $_.EventType -match '(?i)hang' }).Count
+            Write-Host ''
+            Write-Host '    No faulting module recorded in any of these reports.' -ForegroundColor Gray
+            if ($hangs -gt 0) {
+                Write-Host ('    {0} of them are hangs, which never have one - a hung thread raised' -f $hangs) -ForegroundColor Gray
+                Write-Host '    no exception, so there is no module to blame.' -ForegroundColor Gray
+            }
+            Write-Host '    The rest are non-critical reports (failed updates and installs), not' -ForegroundColor Gray
+            Write-Host '    crashes. Nothing here points at a driver or a component.' -ForegroundColor Gray
         }
     }
 

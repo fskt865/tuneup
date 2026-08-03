@@ -225,9 +225,11 @@ function Get-WerReports {
                     # none.
                     $sigNames = @{}
                     $sigValues = @{}
+                    $werEventType = $null
                     foreach ($line in (Get-Content -LiteralPath $wer.FullName -ErrorAction Stop)) {
                         if ($line -match '^Sig\[(\d+)\]\.Name=(.*)$') { $sigNames[$Matches[1]] = $Matches[2].Trim(); continue }
                         if ($line -match '^Sig\[(\d+)\]\.Value=(.*)$') { $sigValues[$Matches[1]] = $Matches[2].Trim(); continue }
+                        if ($line -match '^EventType=(.+)$') { $werEventType = $Matches[1].Trim(); continue }
                         if ($line -match '^ModName=(.+)$') { $modName = $Matches[1].Trim(); continue }
                         if ($line -match '^ExceptionCode=(.+)$') { $exception = $Matches[1].Trim(); continue }
                     }
@@ -236,6 +238,21 @@ function Get-WerReports {
                         switch -Regex ($sigNames[$idx]) {
                             '^Fault Module Name$' { if (-not $modName) { $modName = $sigValues[$idx] } }
                             '^Exception Code$' { if (-not $exception) { $exception = $sigValues[$idx] } }
+                            # Windows servicing failures (WindowsWcp*) carry a
+                            # Status rather than an exception, and their Sig[0]
+                            # is an OS version - so without this they surface as
+                            # a build number where an application should be.
+                            '^Status$' { if (-not $exception) { $exception = $sigValues[$idx] } }
+                        }
+                    }
+
+                    # The .wer states its own event type, which is more precise
+                    # than the folder-name prefix: "Critical" on disk is really
+                    # WindowsWcpOtherFailure3, a servicing fault and not a crash.
+                    if ($werEventType) {
+                        $eventType = $werEventType
+                        if ($werEventType -match '^WindowsWcp' -and $app -match '^\(Windows ') {
+                            $app = '(Windows servicing)'
                         }
                     }
 

@@ -68,7 +68,7 @@ Modules (type the key):
    startup     Startup item inventory and control
    browser     Browser hijack and redirect detection
    driver      Driver problem and rollback assistant
-   stress      Load and stability testing
+   evidence    Hardware evidence around an external stress test
    network     Network diagnosis and repair
    clocks      Clock and power-state review
    crashes     Crash report review
@@ -94,9 +94,9 @@ Non-interactive:
 .\Invoke-TuneUp.ps1 -Module browser -Apply -WhatIf           # show the fix plan
 .\Invoke-TuneUp.ps1 -Module driver                           # diagnose only
 .\Invoke-TuneUp.ps1 -Module driver -Apply                    # only creates a restore point
-.\Invoke-TuneUp.ps1 -Module stress                           # preflight, no load
-.\Invoke-TuneUp.ps1 -Module stress -Apply -Minutes 10        # sustained load with telemetry
-.\Invoke-TuneUp.ps1 -Module stress -Apply -MaxTempC 90       # lower the abort threshold
+.\Invoke-TuneUp.ps1 -Module evidence                         # baseline before stressing
+.\Invoke-TuneUp.ps1 -Module evidence -Phase Watch -Minutes 15 # sample while OCCT runs
+.\Invoke-TuneUp.ps1 -Module evidence -Phase Compare          # diff against the baseline
 .\Invoke-TuneUp.ps1 -Module network                          # walk the ladder, change nothing
 .\Invoke-TuneUp.ps1 -Module network -Apply                   # safe repairs only
 .\Invoke-TuneUp.ps1 -Module network -Apply -Disruptive       # DISABLED - saves config, prints commands
@@ -402,22 +402,46 @@ Windows throttles it (one per 24h by default) the module says the point was
 Device instance IDs go to the console only, never the report — they routinely
 embed hardware serials (`USB\VID_xxxx&PID_xxxx\<serial>`).
 
-### stress
+### evidence
 
-**An orchestration and evidence layer, not a measurement layer.** Established
-open-source tools measure hardware better than anything written here, so this
-drives them where they exist and falls back to Windows' APIs where they do
-not. It contributes three things they don't:
+**The evidence half of a stress test. It generates no load.** OCCT, Cinebench,
+FurMark and MemTest86+ apply load better than anything written here and are on
+the stick already. What they don't do is tell you which component logged a
+hardware error while they ran — that is this module's job.
 
-1. **WHEA correlation.** Snapshot the hardware error log, apply load, snapshot
-   again, attribute anything *new* to a component. That is what answers "which
-   part is failing" — the load exists to provoke errors, the event diff names
-   the culprit. Errors that appear under load and not before is the strongest
-   evidence available from inside Windows.
-2. **The disk-health interlock** — refuses to run when a drive is not
-   reporting healthy, because the data comes off first. `-Force` overrides and
-   says what is being overridden.
+Three phases around a tool this module does not run:
+
+```
+-Phase Baseline    snapshot SMART, sensors, battery and the error log first
+-Phase Watch       sample temps, clocks and fans WHILE your tool runs
+-Phase Compare     diff everything against the baseline
+```
+
+`Baseline` is the default — the read-only thing you get when you forget an
+argument. The baseline is written to `C:\ProgramData\GSTuneUp`, never the
+stick, so it survives closing the window while OCCT runs.
+
+It contributes three things the load tools don't:
+
+1. **WHEA correlation.** Snapshot the hardware error log, let an external tool
+   provoke the fault, snapshot again, attribute anything *new* to a component.
+   Errors that appear under load and not before is the strongest evidence
+   available from inside Windows.
+2. **The disk-health interlock** — warns hard when a drive is not reporting
+   healthy, because the data comes off first. It cannot stop an external tool,
+   which is exactly why it says so before you start one.
 3. **The sanitized report**, so findings can leave the customer's machine.
+
+**Load being external creates one new way to be wrong, and it is the important
+one.** If the tech never actually started the stress tool, the diff comes back
+empty and reads as a pass. So `Watch` measures whether load was *observed* and
+states it plainly — no observation, no pass.
+
+That check cannot be CPU utilisation alone. A GPU stress test leaves the CPU
+near idle **by design**, so judging it on CPU percentage would report "nothing
+was tested" while FurMark cooks the card. A rise in GPU temperature counts as
+load too, and the verdict names *which kind* was seen: a GPU run explicitly
+says the CPU was not exercised rather than implying the whole machine passed.
 
 Every source is matched on provider **and** event ID. `Kernel-Power` alone
 emits hundreds of routine power-state events; only ID 41 is an unexpected
@@ -526,7 +550,7 @@ exFAT rather than FAT32 means no 4 GB per-file limit, so full Windows install
 ISOs fit.
 
 **Memory testing now lives here.** Boot the stick, pick MemTest86+, give it
-several passes. That is the component the `stress` module deliberately refuses
+several passes. That is the component the `evidence` module deliberately refuses
 to test from inside Windows.
 
 ## Deploying to a stick
@@ -561,7 +585,7 @@ modules\Remove-Bloatware.ps1     tiered app classification and removal
 modules\Manage-StartupItems.ps1  startup inventory, reversible disable
 modules\Repair-BrowserHijack.ps1 redirect detection, narrow repair
 modules\Repair-DriverRollback.ps1 device faults, rollback guidance
-modules\Test-SystemStress.ps1    load testing with thermal telemetry
+modules\Get-HardwareEvidence.ps1 sensors, SMART and error diffing (no load)
 modules\Repair-Network.ps1       connectivity ladder, tiered repairs
 modules\Get-CrashReports.ps1     kernel dumps, WER, third-party crash stores
 modules\Get-ClockStatus.ps1      rated vs running clocks, power-state caps
@@ -572,7 +596,7 @@ tests\Test-Modules.ps1           discovery + bloatware classification
 tests\Test-BrowserHijack.ps1     shortcut detection and repair
 tests\Test-Startup.ps1           StartupApproved encoding + classification
 tests\Test-Driver.ps1            problem codes + boot-critical risk tiers
-tests\Test-Stress.ps1            temp conversion, caps, safety interlocks
+tests\Test-Evidence.ps1          temp conversion, load observation, interlocks
 tests\Test-Network.ps1           address classification, ladder logic
 tests\Test-Crashes.ps1           bugcheck decode, dump header, WER names, clocks
 ```
@@ -582,7 +606,7 @@ tests\Test-Crashes.ps1           bugcheck decode, dump header, WER names, clocks
 ## Testing status
 
 Run everything with `tests\Run-AllTests.ps1`. Verified on Windows 11 24H2
-(26100), PowerShell 5.1 — 308 assertions across eight suites, all passing:
+(26100), PowerShell 5.1 — 382 assertions across eight suites, all passing:
 
 - **Sanitizer (29):** live hostname/account/profile-path redaction, synthetic
   MAC/IPv4/email/user-path/product-key/GUID/SID, nested object graphs, a
@@ -610,9 +634,12 @@ degradation, and execution from the stick.
   including Windows' own flag beating the class list, an invariant that no
   boot-critical or high-risk class reads as Standard, and confirmation that
   `Status <> OK` devices with no fault code are excluded.
-- **Stress (26):** deci-Kelvin conversion at four reference points, duration
-  caps, preflight proven read-only by elapsed time, disk-health interlock
-  shape, sensor status honesty, and tool discovery listing executables only.
+- **Evidence (79):** deci-Kelvin conversion at four reference points, watch-window
+  caps, baseline proven read-only by elapsed time and round-tripped through
+  disk, disk-health interlock shape, sensor status honesty, tool discovery
+  listing executables only, proof the load-generating functions have not come
+  back — and the load-observation matrix, including that a GPU run with an idle
+  CPU counts as load but never licenses a CPU pass.
 - **Network (28):** address classification including both RFC1918 boundaries
   (`172.15` and `172.32` must read as public), APIPA and static verdicts, and
   ladder logic — gateway-down-plus-dns-down reports gateway, a genuine DNS

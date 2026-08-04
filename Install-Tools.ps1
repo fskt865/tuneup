@@ -63,7 +63,7 @@ $Packages = @(
 function Show-MemTestNote {
     Write-Host '  MEMORY - not installable, and not optional' -ForegroundColor Cyan
     Write-Host '    Nothing running inside Windows can test RAM the OS is already using,' -ForegroundColor DarkGray
-    Write-Host '    so the stress module does not pretend to. MemTest86+ (GPL v2) boots the' -ForegroundColor DarkGray
+    Write-Host '    so the evidence module does not pretend to. MemTest86+ (GPL v2) boots the' -ForegroundColor DarkGray
     Write-Host '    machine into its own environment and is the real test.' -ForegroundColor DarkGray
     Write-Host '      memtest.org  - free, open source, bootable image' -ForegroundColor DarkGray
     Write-Host '    Put the image on a Ventoy partition on this stick and boot it. Give it' -ForegroundColor DarkGray
@@ -128,7 +128,7 @@ $missing = @($state | Where-Object { -not $_.Found })
 if (-not $Install -and -not $CopyToStick) {
     Write-Host ''
     if ($missing.Count -eq 0) {
-        Write-Host '  All three present. The stress module will use them automatically.' -ForegroundColor Green
+        Write-Host '  All three present. The evidence module will use them automatically.' -ForegroundColor Green
     }
     else {
         Write-Host ('  {0} missing. To install them on THIS machine:' -f $missing.Count) -ForegroundColor Cyan
@@ -202,7 +202,7 @@ if ($CopyToStick) {
         Write-Host ('    {0,-22} on stick: {1}' -f $p.Name, [bool]$hit) -ForegroundColor $(if ($hit) { 'Green' } else { 'Yellow' })
     }
     Write-Host ''
-    Write-Host '  Remember: LibreHardwareMonitor must be RUNNING for the stress module' -ForegroundColor Yellow
+    Write-Host '  Remember: LibreHardwareMonitor must be RUNNING for the evidence module' -ForegroundColor Yellow
     Write-Host '  to read temperatures and fan RPM. Installed but closed is no use.' -ForegroundColor Yellow
     Write-Host '  It also needs elevation to reach most sensors.' -ForegroundColor Yellow
 }

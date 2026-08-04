@@ -1,6 +1,6 @@
 # tools\
 
-Drop third-party diagnostic and stress utilities here. The `stress` module
+Drop third-party diagnostic and stress utilities here. The `evidence` module
 lists whatever it finds so you know what is on the stick, and then gets out of
 the way — it does not launch them.
 
@@ -28,7 +28,7 @@ several of these are free for personal use only.
 
 ## Before running any of them on a customer's machine
 
-The `stress` module's interlock applies just as much when you drive a tool by
+The `evidence` module's interlock applies just as much when you drive a tool by
 hand: **do not stress a machine whose disk is not reporting healthy.** Image it
 and get the data off first. Load testing a dying drive can turn a recoverable
 job into an unrecoverable one, and that is the whole ballgame at Level 1.

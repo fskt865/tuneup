@@ -111,7 +111,7 @@ function Get-MemoryClockStatus {
 
 # Live clocks from LibreHardwareMonitor if it happens to be running. Not
 # started here - this module is read-only and a sensor provider loads a kernel
-# driver. The stress module starts it when a run actually needs it.
+# driver. The evidence module starts it when a run actually needs it.
 function Get-LiveClocks {
     $out = @()
     try {
@@ -188,7 +188,7 @@ function Invoke-ClockModule {
         if ($cpu.PerformancePct -gt 105) { $pctColor = 'Cyan'; $pctNote = 'above base clock - turbo or an overclock' }
         if ($cpu.PerformancePct -lt 80) { $pctColor = 'Yellow'; $pctNote = 'BELOW base clock - being held back' }
         Write-Host ('    Running at       : {0}% of base clock - {1}' -f $cpu.PerformancePct, $pctNote) -ForegroundColor $pctColor
-        Write-Host '    (sampled at idle - the stress module measures this under load)' -ForegroundColor DarkGray
+        Write-Host '    (sampled at idle - the evidence module watches this under external load)' -ForegroundColor DarkGray
     }
 
     # --- Power policy: the usual culprit --------------------------------
@@ -273,7 +273,7 @@ function Invoke-ClockModule {
     else {
         Write-Host ''
         Write-Host '  LIVE CLOCKS: not available - LibreHardwareMonitor is not running.' -ForegroundColor DarkGray
-        Write-Host '  Per-core and GPU clocks need it up; the stress module starts it when' -ForegroundColor DarkGray
+        Write-Host '  Per-core and GPU clocks need it up; the evidence module starts it when' -ForegroundColor DarkGray
         Write-Host '  a load run needs sensors.' -ForegroundColor DarkGray
     }
 

@@ -24,10 +24,13 @@ param(
     # Undo: re-enable everything the startup module disabled on this machine.
     [switch]$Restore,
 
-    # Load testing (stress module).
+    # Hardware evidence module. It applies no load itself - Phase selects which
+    # side of an external stress test to record. NOT called Action: that name
+    # is already the top-level Report/Repair/Clean selector above.
+    [ValidateSet('Baseline', 'Watch', 'Compare')]
+    [string]$Phase,
     [int]$Minutes,
-    [int]$MaxTempC,
-    [int]$Threads,
+    [switch]$NoLaunchSensors,
     [switch]$Force,
 
     # Network: opt in to winsock / TCP-IP stack resets. Both need a reboot,
@@ -50,6 +53,14 @@ $ErrorActionPreference = 'Continue'
 # letter twice and hardcoding one will burn you inside a week.
 $Root = $PSScriptRoot
 if (-not $Root) { $Root = Split-Path -Parent $MyInvocation.MyCommand.Path }
+
+# $PSBoundParameters is scoped to the function that reads it. Invoke-Action is
+# a function, so asking it there returns ITS parameters (just -Name) and every
+# "was this switch actually supplied?" test came back false - which silently
+# dropped -Minutes and friends on the floor and left modules on their defaults
+# no matter what was typed. Capture the SCRIPT's bound parameters here, at
+# script scope, and test against this instead.
+$script:ScriptBound = $PSBoundParameters
 
 . (Join-Path $Root 'lib\Common.ps1')
 . (Join-Path $Root 'lib\Sanitize.ps1')
@@ -328,10 +339,12 @@ function Invoke-Action {
                 Disruptive      = [bool]$Disruptive
             }
             # Only pass numeric options through when actually supplied, so a
-            # module keeps its own default instead of receiving 0.
-            if ($PSBoundParameters.ContainsKey('Minutes'))  { $opts['Minutes'] = $Minutes }
-            if ($PSBoundParameters.ContainsKey('MaxTempC')) { $opts['MaxTempC'] = $MaxTempC }
-            if ($PSBoundParameters.ContainsKey('Threads'))  { $opts['Threads'] = $Threads }
+            # module keeps its own default instead of receiving 0. Note this
+            # reads $script:ScriptBound, not $PSBoundParameters - see the note
+            # where it is captured.
+            if ($script:ScriptBound.ContainsKey('Minutes')) { $opts['Minutes'] = $Minutes }
+            if ($script:ScriptBound.ContainsKey('Phase'))   { $opts['Action'] = $Phase }
+            if ($NoLaunchSensors) { $opts['NoLaunchSensors'] = $true }
             $results.ModuleResult = Invoke-TuneUpModuleByInfo -ModuleInfo $info -Apply:$Apply -Options $opts
             $results.Report = Get-TuneUpReport -SkipEventLogs:$SkipEventLogs
         }
@@ -401,10 +414,21 @@ function Invoke-ModuleFromMenu {
     $script:Apply = $false
     Invoke-ActionSafely -Name 'Module'
 
-    # Wording matters: "apply fixes" is meaningless for a module that runs a
-    # load test, and reads as though there is nothing to do.
+    # Read-only modules have nothing to apply. Asking "apply fixes?" after one
+    # implies there is a second half that changes something, and there is not.
+    if (@('crashes', 'evidence') -contains $Key) {
+        Write-Host ''
+        Write-Host '  This module is read-only - nothing to apply.' -ForegroundColor DarkGray
+        if ($Key -eq 'evidence') {
+            Write-Host '  Run your stress tool, then:  -Module evidence -Phase Watch' -ForegroundColor Gray
+            Write-Host '  or afterwards:               -Module evidence -Phase Compare' -ForegroundColor Gray
+        }
+        return
+    }
+
+    # Wording matters: "apply fixes" is meaningless for a module that only
+    # creates a restore point, and reads as though there is nothing to do.
     $prompt = '  Apply fixes for this module?'
-    if ($Key -eq 'stress') { $prompt = '  Run the load test now? It will peg every core for the full duration.' }
     if ($Key -eq 'driver') { $prompt = '  Create a System Restore point? (this module never rolls drivers back)' }
 
     Write-Host ''

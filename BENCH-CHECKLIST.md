@@ -37,7 +37,7 @@ unresponsive for minutes.
 powershell -NoProfile -ExecutionPolicy Bypass -File D:\tuneup\tests\Run-AllTests.ps1
 ```
 
-Expect `ALL SUITES PASSED`, 238 assertions. Elevated runs exercise branches
+Expect `ALL SUITES PASSED`, 382 assertions. Elevated runs exercise branches
 the unelevated suite skips — the live System-signed sweep and the thermal and
 driver-store reads.
 
@@ -218,31 +218,47 @@ turns up.
 
 **Do not run these on the machine you depend on.**
 
-### 11. Load test
+### 11. Load test — external tool, toolkit records it
 
-Mains power, lid open, and watch it.
-
-```bash
-D:\tuneup\RUN.cmd -Module stress -Apply -Minutes 5
-```
-
-This machine exposes no ACPI thermal zone, so **the thermal abort will not
-work** — the module says so, and you are the abort. Stop it yourself if it
-gets hot.
-
-**Pass criteria:** all logical cores pegged, samples every 5s, `% Processor
-Performance` recorded, and — most important — **every worker job gone when it
-ends**. Check:
+Mains power, lid open, and watch it. **The toolkit applies no load** — OCCT and
+Cinebench are on the stick and do that job. Three steps:
 
 ```bash
-powershell -NoProfile -Command "Get-Job | Format-Table Id, State, Command"
+D:\tuneup\RUN.cmd -Module evidence
 ```
 
-Empty. Then run it again and press **Ctrl-C halfway**, and check again.
-Leftover jobs after an interrupt is the one failure mode that would be
-genuinely bad on a customer's machine.
+Baseline first, before anything is loaded. If it warns that a disk is not
+reporting healthy, **stop** — image it and get the data off first. Nothing can
+stop OCCT once you start it, which is why the warning comes before.
 
-**Closes:** the `-Apply` load path and the `finally` cleanup.
+Now start your stress tool (`D:\OCCT.exe`, or Cinebench for a CPU run), then in
+a second window:
+
+```bash
+D:\tuneup\RUN.cmd -Module evidence -Phase Watch -Minutes 15
+```
+
+This machine exposes no ACPI thermal zone, so **temperature may read `n/a`** —
+the module says so rather than implying it is cool. You are the thermal abort.
+Stop the stress tool yourself if it gets hot.
+
+**Pass criteria:** samples every 5s, and the verdict opens with **`Load
+observed`**. If it says `NO SUSTAINED LOAD OBSERVED`, the stress tool was not
+actually running — nothing below that line means anything, and it says so.
+On a GPU-only run the verdict must say load was observed *and* that the CPU was
+not exercised; a GPU test must never read as a whole-machine pass.
+
+Afterwards:
+
+```bash
+D:\tuneup\RUN.cmd -Module evidence -Phase Compare
+```
+
+New WHEA, disk or TDR events since the baseline are the finding. SMART
+attributes that *moved* during the run mean the drive is failing now, not
+historically — stop testing at that point.
+
+**Closes:** the baseline/watch/compare path and the load-observation guard.
 
 ### 11b. Memory — MemTest86+
 
@@ -252,7 +268,7 @@ Boot the target from the stick, choose `memtest86plus-8.10.iso` from Ventoy's
 menu, and let it run **several passes** — a single pass misses intermittent
 faults, which are the ones that produce "random" crashes.
 
-This is the only real memory test available. The `stress` module reports
+This is the only real memory test available. The `evidence` module reports
 Memory as `NOT TESTED` by design and will keep doing so; nothing running
 inside Windows can test RAM the OS is already using.
 

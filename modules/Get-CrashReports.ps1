@@ -51,8 +51,16 @@ $script:BugcheckMap = @{
     0xF4  = @{ Name = 'CRITICAL_OBJECT_TERMINATION';   Component = 'OS / storage' }
     0x101 = @{ Name = 'CLOCK_WATCHDOG_TIMEOUT';        Component = 'CPU'; Note = 'A core stopped responding' }
     0x109 = @{ Name = 'CRITICAL_STRUCTURE_CORRUPTION'; Component = 'RAM or driver' }
+    0x113 = @{ Name = 'VIDEO_DXGKRNL_FATAL_ERROR';     Component = 'GPU' }
     0x116 = @{ Name = 'VIDEO_TDR_ERROR';               Component = 'GPU'; Note = 'Display driver failed to reset' }
     0x117 = @{ Name = 'VIDEO_TDR_TIMEOUT_DETECTED';    Component = 'GPU' }
+    0x119 = @{ Name = 'VIDEO_SCHEDULER_INTERNAL_ERROR'; Component = 'GPU' }
+    # 0x141 and 0x142 almost always arrive as LIVE kernel events rather than
+    # blue screens - the machine kept running (or appeared to hang) and wrote a
+    # dump to LiveKernelReports instead of bugchecking. Without them here a
+    # display-engine timeout reads as 'Unrecognised stop code'.
+    0x141 = @{ Name = 'VIDEO_ENGINE_TIMEOUT_DETECTED'; Component = 'GPU'; Note = 'A GPU engine stopped responding and did not recover - the classic freeze-with-looping-audio signature' }
+    0x142 = @{ Name = 'VIDEO_TDR_APPLICATION_BLOCKED'; Component = 'GPU'; Note = 'Windows blocked an app after repeated display resets' }
     0x124 = @{ Name = 'WHEA_UNCORRECTABLE_ERROR';      Component = 'Hardware'; Note = 'The machine reported a hardware fault - CPU, RAM or board' }
     0x133 = @{ Name = 'DPC_WATCHDOG_VIOLATION';        Component = 'Driver / storage'; Note = 'Often an old SSD firmware or storage driver' }
     0x139 = @{ Name = 'KERNEL_SECURITY_CHECK_FAILURE'; Component = 'Driver or RAM' }
@@ -68,6 +76,27 @@ function Get-BugcheckInfo {
         }
     }
     return [pscustomobject]@{ Code = ('0x{0:X}' -f $Code); Name = 'Unrecognised stop code'; Component = 'Unknown'; Note = 'Look it up before acting' }
+}
+
+# LiveKernelReports bucket folder -> subsystem. Only patterns specific enough
+# to be sure are listed; an unknown bucket returns nothing rather than a guess,
+# because a wrong component here sends a tech to the wrong part.
+function Get-LiveKernelBucketComponent {
+    param([string]$Bucket)
+    if (-not $Bucket) { return $null }
+    switch -Regex ($Bucket) {
+        # Accept the bare and 0x-prefixed forms, but the trailing (?!\d) matters:
+        # without it LiveKernelEvent_1410 would match 141 and be blamed on the GPU.
+        '(?i)^LiveKernelEvent_?(0x)?0*141(?!\d)' { return 'GPU' }
+        '(?i)^LiveKernelEvent_?(0x)?0*117(?!\d)' { return 'GPU' }
+        '(?i)display|dxgkrnl|video'   { return 'GPU' }
+        '(?i)^PoW32kWatchdog$'        { return 'Display / power transition' }
+        '(?i)^WATCHDOG$'              { return 'Driver watchdog - a driver stopped responding' }
+        '(?i)usbhub|^USB'             { return 'USB controller or device' }
+        '(?i)^NDIS$|network'          { return 'Network adapter' }
+        '(?i)storport|storage|^disk$' { return 'Storage' }
+        default { return $null }
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -112,13 +141,30 @@ function Get-KernelDumps {
             $code = Read-MinidumpBugcheck -Path $f.FullName
             $info = $null
             if ($null -ne $code) { $info = Get-BugcheckInfo -Code ([int]$code) }
+
+            # LiveKernelReports files sit in a Windows-generated bucket folder
+            # (WATCHDOG, PoW32kWatchdog, USBHUB3, LiveKernelEvent_141...). The
+            # bucket names the failing subsystem on its own, so it is worth
+            # having even when the header reads fine - and it is the ONLY
+            # answer when the header does not. The names are Windows constants,
+            # not customer data.
+            $bucket = $null
+            $component = $(if ($info) { $info.Component } else { 'Unknown' })
+            if ($loc.Kind -eq 'LiveKernel') {
+                $parent = Split-Path -Parent $f.FullName
+                if ($parent -and $parent -ne $loc.Path) { $bucket = Split-Path -Leaf $parent }
+                $guess = Get-LiveKernelBucketComponent -Bucket $bucket
+                if ($guess -and $component -eq 'Unknown') { $component = $guess }
+            }
+
             $out.Dumps += [pscustomobject]@{
                 Kind = $loc.Kind
+                Bucket = $bucket
                 AgeDays = [math]::Round(((Get-Date) - $f.LastWriteTime).TotalDays, 1)
                 SizeMB = [math]::Round($f.Length / 1MB, 1)
                 StopCode = $(if ($info) { $info.Code } else { $null })
                 StopName = $(if ($info) { $info.Name } else { 'unreadable header' })
-                Component = $(if ($info) { $info.Component } else { 'Unknown' })
+                Component = $component
                 Note = $(if ($info) { $info.Note } else { '' })
             }
         }
@@ -347,6 +393,175 @@ function Get-ReliabilitySummary {
 }
 
 # ---------------------------------------------------------------------------
+# HARD HANGS - the crashes that leave no crash artefact.
+#
+# A machine that locks solid never bugchecks, so it writes no dump, no WER
+# report and no reliability record. Every source above comes back empty and the
+# module used to print "none", which reads as "no fault recorded" when the truth
+# was "it hung so hard nothing could be written". Those are opposite findings.
+#
+# Kernel-Power 41 is the marker. It is logged on the NEXT boot whenever the
+# previous shutdown was not clean, and its event data says which kind:
+#
+#   BugcheckCode != 0                     -> it blue-screened; the dump above
+#                                            has the detail
+#   BugcheckCode 0, power button pressed  -> IT HUNG and was power-cycled
+#   BugcheckCode 0, no button press       -> power was lost outright: PSU,
+#                                            battery, thermal cutout, or the
+#                                            cable
+#
+# Read the event data BY NAME, never by index - same lesson as the WER Sig
+# fields. The Kernel-Power 41 payload has grown across Windows versions and the
+# field order is not stable, so position-based reads silently return the wrong
+# number. Where a field is absent the answer is 'undetermined', not a guess.
+# ---------------------------------------------------------------------------
+# Get-WinEvent throws rather than returning nothing when a filter matches no
+# events, and it throws for real failures too. Merging those would turn "could
+# not read the log" into a clean bill of health, so they are separated here.
+#
+# Discriminate on FullyQualifiedErrorId, NOT on the message text: the messages
+# are localized and matching them would silently misclassify every query on a
+# non-English Windows. Two ids mean "nothing matched":
+#   NoMatchingEventsFound      - the log has no such events
+#   LogsAndProvidersDontOverlap- that provider writes nothing to that log,
+#                                which is what a machine with no display reset
+#                                in its history actually looks like
+# Anything else is a genuine failure and must be reported as no information.
+function Get-WinEventOrEmpty {
+    param([Parameter(Mandatory = $true)][hashtable]$Filter, [int]$MaxEvents = 200)
+
+    $out = [ordered]@{ Status = 'Read'; Events = @() }
+    try {
+        $out.Events = @(Get-WinEvent -FilterHashtable $Filter -MaxEvents $MaxEvents -ErrorAction Stop)
+    }
+    catch {
+        $id = [string]$_.FullyQualifiedErrorId
+        if ($id -match '^(NoMatchingEventsFound|LogsAndProvidersDontOverlap)') {
+            $out.Events = @()
+        }
+        else {
+            $out.Status = 'Unavailable'
+            $out.Events = @()
+        }
+    }
+    return [pscustomobject]$out
+}
+
+function Get-EventDataByName {
+    param($Event)
+    $map = @{}
+    try {
+        $x = [xml]$Event.ToXml()
+        foreach ($d in $x.Event.EventData.Data) {
+            if ($d.Name) { $map[[string]$d.Name] = [string]$d.'#text' }
+        }
+    }
+    catch { }
+    return $map
+}
+
+# Classify one Kernel-Power 41 event from its named data fields. Separated from
+# the log query so every branch can be tested without having to crash a machine
+# to produce a sample.
+#
+# Returns: Bugcheck | HardHang | PowerLoss | Undetermined
+function Get-UncleanShutdownKind {
+    param([Parameter(Mandatory = $true)][hashtable]$Props)
+
+    $bc = [int64]0
+    $haveBc = $false
+    if ($Props.ContainsKey('BugcheckCode')) {
+        $haveBc = [int64]::TryParse([string]$Props['BugcheckCode'], [ref]$bc)
+    }
+
+    $btn = [int64]0
+    $haveBtn = $false
+    if ($Props.ContainsKey('PowerButtonTimestamp')) {
+        $haveBtn = [int64]::TryParse([string]$Props['PowerButtonTimestamp'], [ref]$btn)
+    }
+
+    # Windows 10+ adds an explicit flag; when present it is the better signal
+    # because a long press is unambiguous.
+    $longPress = $false
+    if ($Props.ContainsKey('LongPowerButtonPressDetected')) {
+        $longPress = ([string]$Props['LongPowerButtonPressDetected'] -match '(?i)^\s*(true|1)\s*$')
+    }
+
+    if ($haveBc -and $bc -ne 0) { return 'Bugcheck' }
+    if ($longPress) { return 'HardHang' }
+    # Without the button field there is no way to tell a hang from a power cut,
+    # and guessing sends a tech to the wrong part - PSU versus GPU.
+    if (-not $haveBtn) { return 'Undetermined' }
+    if ($btn -ne 0) { return 'HardHang' }
+    return 'PowerLoss'
+}
+
+function Get-HangEvidence {
+    $out = [ordered]@{
+        Status        = 'Unknown'
+        HardHangs     = 0
+        PowerLosses   = 0
+        Bugchecks     = 0
+        Undetermined  = 0
+        NewestHangAgeDays = $null
+        DisplayResets = 0
+        DisplayResetStatus = 'Unknown'
+        NewestDisplayResetAgeDays = $null
+        Note          = ''
+    }
+    $cutoff = (Get-Date).AddDays(-$script:CrashLookbackDays)
+
+    # --- Kernel-Power 41 ---------------------------------------------------
+    $q = Get-WinEventOrEmpty -Filter @{
+        LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-Power'
+        Id = 41; StartTime = $cutoff
+    } -MaxEvents 200
+    $out.Status = $q.Status
+    if ($q.Status -ne 'Read') {
+        $out.Note = 'the System log could not be queried'
+        return [pscustomobject]$out
+    }
+
+    foreach ($e in $q.Events) {
+        $props = Get-EventDataByName -Event $e
+        $kind = Get-UncleanShutdownKind -Props $props
+        $age = [math]::Round(((Get-Date) - $e.TimeCreated).TotalDays, 1)
+
+        switch ($kind) {
+            'Bugcheck' { $out.Bugchecks++ }
+            'PowerLoss' { $out.PowerLosses++ }
+            'HardHang' {
+                $out.HardHangs++
+                if ($null -eq $out.NewestHangAgeDays -or $age -lt $out.NewestHangAgeDays) {
+                    $out.NewestHangAgeDays = $age
+                }
+            }
+            default { $out.Undetermined++ }
+        }
+    }
+
+    # --- Display driver resets that recovered ------------------------------
+    # A TDR the driver recovered from produces no dump at all, only this event.
+    # It is the other half of the same story: repeated resets under load, then
+    # one that does not recover, is the freeze.
+    $tq = Get-WinEventOrEmpty -Filter @{
+        LogName = 'System'; ProviderName = 'Microsoft-Windows-DxgKrnl'
+        Id = 4101; StartTime = $cutoff
+    } -MaxEvents 500
+    $out.DisplayResetStatus = $tq.Status
+    if ($tq.Status -eq 'Read') {
+        $tdr = @($tq.Events)
+        $out.DisplayResets = $tdr.Count
+        if ($tdr.Count -gt 0) {
+            $newest = ($tdr | Sort-Object TimeCreated -Descending | Select-Object -First 1).TimeCreated
+            $out.NewestDisplayResetAgeDays = [math]::Round(((Get-Date) - $newest).TotalDays, 1)
+        }
+    }
+
+    return [pscustomobject]$out
+}
+
+# ---------------------------------------------------------------------------
 function Invoke-CrashModule {
     [CmdletBinding()]
     param([switch]$Apply, [hashtable]$Options = @{})
@@ -361,6 +576,7 @@ function Invoke-CrashModule {
         LookbackDays = $script:CrashLookbackDays
         Elevated = (Test-IsAdmin)
         Kernel = $null
+        Hangs = $null
         Wer = $null
         ThirdParty = @()
         Reliability = $null
@@ -369,6 +585,7 @@ function Invoke-CrashModule {
     }
 
     $result.Kernel = Get-KernelDumps
+    $result.Hangs = Get-HangEvidence
     $result.Wer = Get-WerReports
     $result.ThirdParty = @(Get-ThirdPartyCrashes)
     $result.Reliability = Get-ReliabilitySummary
@@ -377,18 +594,83 @@ function Invoke-CrashModule {
     Write-Host ''
     Write-Host ('  KERNEL CRASHES (blue screens), last {0} days' -f $script:CrashLookbackDays) -ForegroundColor White
     $dumps = @($result.Kernel.Dumps)
+    $hangs = $result.Hangs
     if ($dumps.Count -eq 0) {
-        Write-Host '    none - no kernel dump files on this machine' -ForegroundColor Green
+        # "No dumps" is only good news if nothing else says the machine died.
+        # A hard hang writes no dump, so a green "none" here on a machine that
+        # was power-cycled three times is the exact wrong impression.
+        if ($hangs -and $hangs.Status -eq 'Read' -and ($hangs.HardHangs + $hangs.PowerLosses + $hangs.Undetermined) -gt 0) {
+            Write-Host '    no kernel dump files - but see the section below, this machine went' -ForegroundColor Yellow
+            Write-Host '    down without shutting down cleanly. A hang writes no dump.' -ForegroundColor Yellow
+        }
+        elseif ($null -eq $hangs -or $hangs.Status -ne 'Read') {
+            # Green here would be a clean bill of health drawn from a check that
+            # did not run. There are no dumps, but whether the machine went down
+            # uncleanly is unknown - say only what was actually established.
+            Write-Host '    no kernel dump files on this machine' -ForegroundColor Gray
+            Write-Host '    (whether it went down uncleanly could not be established - see below)' -ForegroundColor Gray
+        }
+        else {
+            Write-Host '    none - no kernel dump files on this machine' -ForegroundColor Green
+        }
     }
     else {
         foreach ($d in ($dumps | Sort-Object AgeDays)) {
             Write-Host ('    {0,-11} {1,5} days ago  {2} {3}' -f $d.Kind, $d.AgeDays, $d.StopCode, $d.StopName) -ForegroundColor Red
+            if ($d.Bucket) { Write-Host ('                bucket:    {0}' -f $d.Bucket) -ForegroundColor Gray }
             Write-Host ('                component: {0}' -f $d.Component) -ForegroundColor Yellow
             if ($d.Note) { Write-Host ('                {0}' -f $d.Note) -ForegroundColor Gray }
         }
         Write-Host ''
         Write-Host '    Dumps stay on this machine. They are a copy of RAM and can contain' -ForegroundColor Yellow
         Write-Host '    documents, passwords and keys - do not copy them off.' -ForegroundColor Yellow
+    }
+
+    # --- Hangs and unclean shutdowns ------------------------------------------
+    Write-Host ''
+    Write-Host ('  FREEZES AND UNEXPECTED SHUTDOWNS, last {0} days' -f $script:CrashLookbackDays) -ForegroundColor White
+    if ($null -eq $hangs -or $hangs.Status -ne 'Read') {
+        Write-Host '    COULD NOT ESTABLISH - the System event log could not be queried.' -ForegroundColor Magenta
+        Write-Host '    This is not a clean bill of health; it is no information.' -ForegroundColor Magenta
+    }
+    elseif (($hangs.HardHangs + $hangs.PowerLosses + $hangs.Bugchecks + $hangs.Undetermined) -eq 0) {
+        Write-Host '    none - every shutdown in this window was clean' -ForegroundColor Green
+    }
+    else {
+        if ($hangs.HardHangs -gt 0) {
+            Write-Host ('    {0,4} x  HARD HANG - locked up and was power-cycled (newest {1} days ago)' -f $hangs.HardHangs, $hangs.NewestHangAgeDays) -ForegroundColor Red
+            Write-Host '            The machine stopped responding without blue-screening, so there' -ForegroundColor Gray
+            Write-Host '            is no dump and no faulting module. Frozen picture with looping' -ForegroundColor Gray
+            Write-Host '            or buzzing audio is this: the audio buffer repeats because' -ForegroundColor Gray
+            Write-Host '            nothing is left running to refill it.' -ForegroundColor Gray
+        }
+        if ($hangs.PowerLosses -gt 0) {
+            Write-Host ('    {0,4} x  POWER LOST - no button press recorded' -f $hangs.PowerLosses) -ForegroundColor Red
+            Write-Host '            PSU, battery, thermal cutout or the cable - not a software fault.' -ForegroundColor Gray
+        }
+        if ($hangs.Bugchecks -gt 0) {
+            Write-Host ('    {0,4} x  blue screen (already counted above - the dump has the detail)' -f $hangs.Bugchecks) -ForegroundColor Yellow
+        }
+        if ($hangs.Undetermined -gt 0) {
+            Write-Host ('    {0,4} x  unclean shutdown, KIND UNDETERMINED' -f $hangs.Undetermined) -ForegroundColor Magenta
+            Write-Host '            The event did not carry the fields that separate a hang from a' -ForegroundColor Gray
+            Write-Host '            power loss. Do not assume either one.' -ForegroundColor Gray
+        }
+    }
+
+    # Display resets are reported whatever the shutdown picture looks like -
+    # they are the strongest single pointer to a GPU when the freeze left
+    # nothing else behind.
+    if ($null -ne $hangs -and $hangs.DisplayResetStatus -eq 'Read' -and $hangs.DisplayResets -gt 0) {
+        Write-Host ''
+        Write-Host ('    {0,4} x  DISPLAY DRIVER RESET and recovered (newest {1} days ago)' -f $hangs.DisplayResets, $hangs.NewestDisplayResetAgeDays) -ForegroundColor Red
+        Write-Host '            The GPU stopped responding and Windows restarted its driver.' -ForegroundColor Gray
+        Write-Host '            These leave no dump. Repeated resets under load, then one that' -ForegroundColor Gray
+        Write-Host '            does not recover, is a freeze - and points at the GPU, its' -ForegroundColor Gray
+        Write-Host '            driver, its power delivery or its temperature.' -ForegroundColor Gray
+    }
+    elseif ($null -ne $hangs -and $hangs.DisplayResetStatus -ne 'Read') {
+        Write-Host '    Display reset count: COULD NOT ESTABLISH' -ForegroundColor Magenta
     }
 
     # --- WER ----------------------------------------------------------------

@@ -32,7 +32,11 @@ $cases = @(
     @{ Code = 0x9C;  Component = 'CPU' },
     @{ Code = 0x1A;  Component = 'RAM' },
     @{ Code = 0x50;  Component = 'RAM' },
-    @{ Code = 0xD1;  Component = 'Driver' }
+    @{ Code = 0xD1;  Component = 'Driver' },
+    @{ Code = 0x141; Component = 'GPU' },
+    @{ Code = 0x142; Component = 'GPU' },
+    @{ Code = 0x113; Component = 'GPU' },
+    @{ Code = 0x119; Component = 'GPU' }
 )
 foreach ($c in $cases) {
     $i = Get-BugcheckInfo -Code $c.Code
@@ -43,6 +47,102 @@ foreach ($c in $cases) {
 $unknown = Get-BugcheckInfo -Code 0xABCDEF
 Assert-True 'Unknown stop code is flagged, not invented' ($unknown.Name -match 'Unrecognised')
 Assert-True 'Unknown stop code says to look it up'       ($unknown.Note -match 'Look it up')
+
+Write-Host ''
+Write-Host '  Unclean shutdown classification' -ForegroundColor Cyan
+Write-Host '  -------------------------------' -ForegroundColor DarkGray
+
+# A hang leaves no dump, so this classification IS the finding. Every branch is
+# exercised from synthetic field sets - waiting for a real machine to hang is
+# not a test strategy, and the branches that matter most are the rare ones.
+$shutdownCases = @(
+    @{ Name = 'Bugcheck code set -> blue screen';
+        Props = @{ BugcheckCode = '26'; PowerButtonTimestamp = '0' }; Expect = 'Bugcheck' },
+    @{ Name = 'Button timestamp set -> hard hang';
+        Props = @{ BugcheckCode = '0'; PowerButtonTimestamp = '132534000000000000' }; Expect = 'HardHang' },
+    @{ Name = 'Long-press flag true -> hard hang';
+        Props = @{ BugcheckCode = '0'; PowerButtonTimestamp = '0'; LongPowerButtonPressDetected = 'true' }; Expect = 'HardHang' },
+    @{ Name = 'Long-press flag as 1 -> hard hang';
+        Props = @{ BugcheckCode = '0'; PowerButtonTimestamp = '0'; LongPowerButtonPressDetected = '1' }; Expect = 'HardHang' },
+    @{ Name = 'No bugcheck and no button -> power loss';
+        Props = @{ BugcheckCode = '0'; PowerButtonTimestamp = '0'; LongPowerButtonPressDetected = 'false' }; Expect = 'PowerLoss' },
+    # The honest third state. An older schema omits the button field entirely,
+    # and PSU versus GPU is not a guess worth making.
+    @{ Name = 'Button field absent -> undetermined, not a guess';
+        Props = @{ BugcheckCode = '0' }; Expect = 'Undetermined' },
+    @{ Name = 'Empty field set -> undetermined';
+        Props = @{}; Expect = 'Undetermined' },
+    @{ Name = 'Unparsable button value -> undetermined';
+        Props = @{ BugcheckCode = '0'; PowerButtonTimestamp = 'not-a-number' }; Expect = 'Undetermined' },
+    # Bugcheck wins over a button press: the machine blue-screened and someone
+    # then held the button. The dump is the better evidence.
+    @{ Name = 'Bugcheck outranks a button press';
+        Props = @{ BugcheckCode = '154'; PowerButtonTimestamp = '132534000000000000' }; Expect = 'Bugcheck' }
+)
+foreach ($c in $shutdownCases) {
+    $got = Get-UncleanShutdownKind -Props $c.Props
+    Assert-True $c.Name ($got -eq $c.Expect) ("got=" + $got)
+}
+
+Write-Host ''
+Write-Host '  Event query: empty vs unreadable' -ForegroundColor Cyan
+Write-Host '  --------------------------------' -ForegroundColor DarkGray
+
+# These must never be merged. "Nothing matched" is a clean bill of health;
+# "could not read" is no information, and reporting the second as the first
+# tells a tech the GPU is fine when nothing was actually checked.
+$empty = Get-WinEventOrEmpty -Filter @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-Power'; Id = 41; StartTime = (Get-Date).AddSeconds(-5) }
+Assert-True 'No matching events still reports Read' ($empty.Status -eq 'Read') ("got=" + $empty.Status)
+Assert-True 'No matching events returns no events'  (@($empty.Events).Count -eq 0)
+
+# A provider that writes nothing to the named log throws a DIFFERENT error id
+# than "no events found" - on a machine that has never had a display reset that
+# is the normal case, and treating it as a failure would bury the real answer.
+$noOverlap = Get-WinEventOrEmpty -Filter @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-DxgKrnl'; Id = 4101; StartTime = (Get-Date).AddDays(-3650) }
+Assert-True 'Provider-with-no-events-in-log reports Read' ($noOverlap.Status -eq 'Read') ("got=" + $noOverlap.Status)
+
+# A log that does not exist is a genuine failure and must say so.
+$bogus = Get-WinEventOrEmpty -Filter @{ LogName = 'NoSuchLog-TuneUpTest'; Id = 1 }
+Assert-True 'Unreadable log reports Unavailable, not Read' ($bogus.Status -eq 'Unavailable') ("got=" + $bogus.Status)
+
+Write-Host ''
+Write-Host '  LiveKernelReports bucket attribution' -ForegroundColor Cyan
+Write-Host '  ------------------------------------' -ForegroundColor DarkGray
+
+$bucketCases = @(
+    @{ Bucket = 'LiveKernelEvent_141';  Expect = 'GPU' },
+    @{ Bucket = 'LiveKernelEvent_0x141'; Expect = 'GPU' },
+    @{ Bucket = 'PoW32kWatchdog';       Expect = 'Display' },
+    @{ Bucket = 'WATCHDOG';             Expect = 'watchdog' },
+    @{ Bucket = 'USBHUB3';              Expect = 'USB' },
+    @{ Bucket = 'NDIS';                 Expect = 'Network' }
+)
+foreach ($b in $bucketCases) {
+    $got = Get-LiveKernelBucketComponent -Bucket $b.Bucket
+    Assert-True ("Bucket {0} -> {1}" -f $b.Bucket, $b.Expect) ($got -match $b.Expect) ("got=" + $got)
+}
+# An unrecognised bucket returns nothing rather than a wrong component.
+Assert-True 'Unknown bucket returns null, not a guess' ($null -eq (Get-LiveKernelBucketComponent -Bucket 'SomeBucketNobodyMapped'))
+Assert-True 'Empty bucket returns null'                ($null -eq (Get-LiveKernelBucketComponent -Bucket ''))
+# A prefix match would blame the GPU for an unrelated event number.
+Assert-True 'Event 1410 does not match event 141' ($null -eq (Get-LiveKernelBucketComponent -Bucket 'LiveKernelEvent_1410'))
+
+Write-Host ''
+Write-Host '  Hang evidence collection' -ForegroundColor Cyan
+Write-Host '  ------------------------' -ForegroundColor DarkGray
+
+$he = Get-HangEvidence
+Assert-True 'Hang evidence returns a result' ($null -ne $he)
+Assert-True 'Status is one of the three states' (@('Read', 'Unavailable', 'Unknown') -contains $he.Status) ("got=" + $he.Status)
+Assert-True 'Display reset status is a known state' (@('Read', 'Unavailable', 'Unknown') -contains $he.DisplayResetStatus) ("got=" + $he.DisplayResetStatus)
+# Counts must never be negative or null - a blank reads as zero and hides a fault.
+foreach ($f in @('HardHangs', 'PowerLosses', 'Bugchecks', 'Undetermined', 'DisplayResets')) {
+    Assert-True ("{0} is a real count" -f $f) ($null -ne $he.$f -and $he.$f -ge 0) ("got=" + $he.$f)
+}
+# An unreadable log must not report zero hangs - that is the false-clean-bill bug.
+if ($he.Status -ne 'Read') {
+    Assert-True 'Unavailable status carries a note' (-not [string]::IsNullOrWhiteSpace($he.Note))
+}
 
 Write-Host ''
 Write-Host '  Minidump header parsing' -ForegroundColor Cyan

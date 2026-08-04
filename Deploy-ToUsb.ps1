@@ -215,9 +215,31 @@ if (-not $WhatIfPreference) {
     }
 
     if ($stale.Count -gt 0) {
-        Write-Host ''
-        Write-Host ('  {0} stale file(s) on the stick, not in this version - delete by hand:' -f $stale.Count) -ForegroundColor Yellow
-        foreach ($s in $stale) { Write-Host ('    ' + $s) -ForegroundColor Yellow }
+        # A stale file under modules\ is not merely clutter. Discovery scans
+        # the directory, so a module removed or renamed in the repo STILL
+        # appears in the field menu from the copy left on the stick - and runs
+        # its old code. That is a removed capability coming back to life on a
+        # customer's machine, so it is called out separately and in red.
+        $staleModules = @($stale | Where-Object { $_ -like 'modules\*' })
+        $staleOther = @($stale | Where-Object { $_ -notlike 'modules\*' })
+
+        if ($staleModules.Count -gt 0) {
+            Write-Host ''
+            Write-Host ('  {0} STALE MODULE(S) STILL ON THE STICK:' -f $staleModules.Count) -ForegroundColor Red
+            foreach ($s in $staleModules) { Write-Host ('    ' + $s) -ForegroundColor Red }
+            Write-Host '  These still appear in the field menu and still run. A module renamed or' -ForegroundColor Yellow
+            Write-Host '  removed in the repo is NOT removed from a stick by deploying over it.' -ForegroundColor Yellow
+            Write-Host '  Delete them before using this stick:' -ForegroundColor Yellow
+            foreach ($s in $staleModules) {
+                Write-Host ('    Remove-Item -LiteralPath "{0}" -Force' -f (Join-Path $target $s)) -ForegroundColor Gray
+            }
+        }
+
+        if ($staleOther.Count -gt 0) {
+            Write-Host ''
+            Write-Host ('  {0} other stale file(s), not in this version - delete by hand:' -f $staleOther.Count) -ForegroundColor Yellow
+            foreach ($s in $staleOther) { Write-Host ('    ' + $s) -ForegroundColor Yellow }
+        }
     }
     Write-Host ''
 }

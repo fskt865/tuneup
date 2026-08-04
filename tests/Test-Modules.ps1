@@ -38,6 +38,43 @@ foreach ($m in $mods) {
     Assert-True ("Module '$($m.Key)' defines its declared entry point") ($text -match ('function\s+' + [regex]::Escape($m.Entry)))
 }
 
+# The module a rename leaves behind is a live module, not clutter.
+#
+# Discovery is DIRECTORY-DRIVEN - that is the whole update surface, and it
+# means a deploy cannot remove a module by copying over the stick. A renamed
+# or deleted module keeps appearing in the field menu, and keeps running its
+# old code, until the orphan file is deleted. This happened for real: renaming
+# a module left the previous one selectable on the stick alongside its
+# replacement. Deploy-ToUsb.ps1 calls stale modules out in red because of this
+# test's premise, so the premise is pinned here.
+$orphanRoot = Join-Path ([IO.Path]::GetTempPath()) ('tuneup-orphan-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+try {
+    New-Item -ItemType Directory -Path $orphanRoot -Force | Out-Null
+    $orphan = Join-Path $orphanRoot 'Some-RemovedModule.ps1'
+    Set-Content -LiteralPath $orphan -Encoding ASCII -Value @(
+        '<#MANIFEST',
+        '{',
+        '  "Key": "removedkey",',
+        '  "Title": "A module that was renamed away",',
+        '  "Entry": "Invoke-RemovedModule",',
+        '  "Order": 90,',
+        '  "RequiresAdmin": false,',
+        '  "Description": "should not survive a rename, but does"',
+        '}',
+        'MANIFEST#>',
+        'function Invoke-RemovedModule { return $true }'
+    )
+    $found = @(Get-TuneUpModules -ModuleRoot $orphanRoot)
+    Assert-True 'A leftover module file is still discovered' `
+    (@($found | Where-Object { $_.Key -eq 'removedkey' }).Count -eq 1) `
+    ("count=" + $found.Count)
+    Assert-True 'Discovery reads the manifest without executing the file' `
+    ($null -eq (Get-Command -Name 'Invoke-RemovedModule' -ErrorAction SilentlyContinue))
+}
+finally {
+    Remove-Item -LiteralPath $orphanRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 # Keys must be unique or the menu dispatches to whichever sorted first.
 $keys = @($mods | ForEach-Object { $_.Key })
 Assert-True 'Module keys are unique' (($keys | Sort-Object -Unique).Count -eq $keys.Count)

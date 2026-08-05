@@ -416,12 +416,19 @@ function Invoke-ModuleFromMenu {
 
     # Read-only modules have nothing to apply. Asking "apply fixes?" after one
     # implies there is a second half that changes something, and there is not.
-    if (@('crashes', 'evidence') -contains $Key) {
+    if (@('crashes', 'evidence', 'elevation') -contains $Key) {
         Write-Host ''
         Write-Host '  This module is read-only - nothing to apply.' -ForegroundColor DarkGray
         if ($Key -eq 'evidence') {
             Write-Host '  Run your stress tool, then:  -Module evidence -Phase Watch' -ForegroundColor Gray
             Write-Host '  or afterwards:               -Module evidence -Phase Compare' -ForegroundColor Gray
+        }
+        if ($Key -eq 'elevation') {
+            Write-Host '  If the complaint is that a fix does not stick, a single reading' -ForegroundColor Gray
+            Write-Host '  cannot see that. Watch it, or bracket a reboot:' -ForegroundColor Gray
+            Write-Host '    -Module elevation -Phase Watch -Minutes 5' -ForegroundColor Gray
+            Write-Host '    -Module elevation -Phase Baseline   (then reboot, then)' -ForegroundColor Gray
+            Write-Host '    -Module elevation -Phase Compare' -ForegroundColor Gray
         }
         return
     }

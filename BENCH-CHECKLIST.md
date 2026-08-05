@@ -144,6 +144,53 @@ Both must be `Running`. A cache clean that leaves WU stopped is a real bug.
 
 **Closes:** cache deletion, the stop/delete/restart service dance.
 
+### 7b. Elevation — run it **unelevated**, on purpose
+
+```bash
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\tuneup\Invoke-TuneUp.ps1 -Module elevation
+```
+
+Launched directly, **not** through `RUN.cmd`, because the whole point is that it
+has to work from a standard-user session — that is the only session available on
+a machine that cannot elevate. `RUN.cmd` self-elevates, so on the machine this
+module exists for it is the one launcher guaranteed to fail. `-ExecutionPolicy
+Bypass` is per-process and needs no rights of its own. On healthy hardware the verdict must be
+`NO BLOCKING CONDITION FOUND`. Anything else here is a false positive and is a
+bug in the module, not a finding about the machine.
+
+Check specifically:
+
+- Rung 1 reports a real integrity level, not `unknown`.
+- Rung 2 does **not** claim a stale token. A filtered admin is the healthy
+  state; both of the first-run false positives lived in these two lines.
+- Rung 5 reports no verb problem.
+- Rung 8 shows counts, with `RequiresElevation` on anything the Security log
+  gates — a blank must never read as a pass.
+
+Then bracket a reboot, which is the only way to exercise the tamper path:
+
+```bash
+D:\tuneup\Invoke-TuneUp.ps1 -Module elevation -Phase Baseline
+```
+
+Reboot, then:
+
+```bash
+D:\tuneup\Invoke-TuneUp.ps1 -Module elevation -Phase Compare
+```
+
+Expect no change on a machine nobody is touching. Baseline lands in
+`C:\ProgramData\GSTuneUp\uac-baseline.json` and is removed by `-Action Purge`.
+
+**Closes:** the ladder end to end unelevated, baseline persistence across a
+reboot, and the healthy-machine verdict.
+
+**Does NOT close:** any fault branch. Every one is unit-tested and none has been
+seen in the wild — disabled `Appinfo`, an IFEO debugger on `consent.exe`, a
+denied standard user, a removable-execute policy. Those stay honestly untested
+until a real machine presents one. Do not induce them on your own machine to
+tick the box; the ones worth testing are the ones that walk in.
+
 ---
 
 ## Tier B — reversible, but it changes your machine

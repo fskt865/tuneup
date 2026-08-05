@@ -362,6 +362,98 @@ non-English Windows where `powercfg` output is localised.
 Read-only. A capped CPU or an overclock is the owner's configuration, so it
 prints the `powercfg` command and stops.
 
+### elevation
+
+"Nothing will run as administrator." That one complaint is produced by at least
+eight different faults that are indistinguishable from the customer's chair, so
+this walks them as a ladder and names the layer:
+
+| # | Rung | What it settles |
+|---|---|---|
+| 1 | Token | Standard user, filtered admin, or already elevated |
+| 2 | Membership | In Administrators — and does the *running token* know it |
+| 3 | Service | AppInfo performs elevation. Disabled, nothing elevates, ever |
+| 4 | Policy | The UAC values. One of them denies silently |
+| 5 | Hijack | IFEO debuggers, SilentProcessExit, the `runas` verb |
+| 6 | Restriction | SRP, AppLocker, Smart App Control, removable-execute denial |
+| 7 | Tamper | Is the state *stable*, or is something rewriting it |
+| 8 | Evidence | Provider-filtered event counts that corroborate 1–7 |
+
+**`RequiresAdmin` is false and that is load-bearing.** This module exists for a
+machine that cannot elevate; one that needed elevation to diagnose elevation
+would be useless on every machine it was written for. Rungs that genuinely need
+elevation report `RequiresElevation` rather than a blank that reads as a pass.
+
+**Do not launch this one with `RUN.cmd`.** `RUN.cmd` self-elevates, so on the
+machine this module is for it is the single launcher guaranteed to fail. Go
+straight at the script — `-ExecutionPolicy Bypass` is per-process and needs no
+rights of its own:
+
+```bash
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\tuneup\Invoke-TuneUp.ps1 -Module elevation
+```
+
+Three findings worth knowing before you need them:
+
+- **AppInfo disabled** is the most common non-malware cause, and it is a
+  10-second fix — but fixing it *needs* elevation, which is what is broken.
+  Safe Mode as the built-in Administrator, or an offline registry edit, is
+  usually the way in.
+- **`ConsentPromptBehaviorUser = 0`** denies every request from a standard
+  account with no prompt and no error. It matches "it just doesn't do anything"
+  more exactly than anything else on the list — and it is also a legitimate
+  hardening choice, so check who owns it first.
+- **An IFEO `Debugger` on `consent.exe`** makes Windows launch the debugger
+  instead of consent. The prompt appears, you click Yes, nothing runs. It is a
+  supported debugging feature, which is why it survives most cleaners.
+
+**Rung 6 exists because a block on the *launch* imitates a block on the
+*elevation*.** If Smart App Control or a removable-execute policy is refusing
+the binary, UAC is innocent and every minute spent on UAC is wasted. When the
+toolkit is running from the stick, the one-minute test that splits these is to
+copy it to `C:\` and launch it there.
+
+#### "A virus keeps turning UAC off"
+
+That is a hypothesis this module **tests**, not one it assumes. UAC settings
+reverting has an innocent twin — a domain or MDM policy refresh putting them
+back every 90 minutes — and a single look at the registry cannot tell the two
+apart. So domain join and MDM enrolment are reported right beside every tamper
+finding, and rung 7 uses three independent signals:
+
+- **Running state vs registry state.** `EnableLUA` only takes effect at boot.
+  So if the registry says UAC is on while this session has no filtered token,
+  the value was changed *after* the machine came up — UAC is off right now
+  whatever Security Centre shows, and stays off until a reboot. That is a fact
+  about time rather than an inference, and it is the strongest evidence
+  available from a single sample.
+- **Key write time vs last boot**, the same argument from the other side.
+- **Authenticode on `consent.exe` and `appinfo.dll`.** A replaced one is a
+  compromised install, not a misconfiguration.
+
+A single reading cannot see a value that gets rewritten later, so there are
+phases for that:
+
+```powershell
+.\Invoke-TuneUp.ps1 -Module elevation -Phase Watch -Minutes 5
+.\Invoke-TuneUp.ps1 -Module elevation -Phase Baseline   # then reboot, then
+.\Invoke-TuneUp.ps1 -Module elevation -Phase Compare
+```
+
+Watch is honest about its own weakness: a quiet window rules out a tight loop
+rewriting the value every few seconds, and rules out nothing on a 90-minute
+refresh cycle. It says so rather than reporting a pass.
+
+**Order matters if it really is an infection.** Repairing UAC while the writer
+is still running gets the repair reverted and teaches nothing: data off first,
+scan offline, then repair, then re-check with `-Phase Compare`. A confirmed
+rootkit or a replaced `consent.exe` is a rebuild conversation, not a registry
+edit — that is where the Level 1 line is.
+
+Read-only, with no `-Apply` half at all. UAC, SRP, AppLocker and WDAC are
+security configuration and often somebody's policy; it prints the exact command
+for each fix and stops.
+
 ### driver
 
 **This module does not roll back drivers**, and that is a finished decision.
@@ -646,6 +738,38 @@ degradation, and execution from the stick.
   fault reports DNS, a captive portal reports http, and an ICMP-filtered
   gateway under working internet reports *no fault at all*. Plus a check that
   the snapshot carries no IPv4 or MAC address.
+- **Elevation (62):** every verdict branch, including three asymmetries that are
+  easy to get backwards — `ConsentPromptBehaviorUser = 0` is a fault for a
+  standard user and *not* for an administrator; a filtered admin token is the
+  **healthy** state and must never be reported as broken; and membership is
+  tri-state, so unreadable must not score as "not a member". Plus snapshot
+  comparison, the honest-zero event path (an empty result is readable with a
+  count of zero, a bad provider is not), and a static check that account
+  **names** never reach the returned report object while member SIDs do.
+
+  Two of those tests are regressions from the first real run, both false
+  positives on a healthy machine, and both worth reading:
+
+  1. `.NET WindowsIdentity.Groups` **omits deny-only groups and the mandatory
+     integrity label**. On a filtered administrator that is exactly the
+     interesting state — `S-1-5-32-544` is in the token as deny-only and .NET
+     reports it as simply absent — so a perfectly healthy machine was told its
+     token was stale and its user should sign out. Token groups now come from
+     `whoami /groups`, parsed by SID because the columns are localised, and
+     `TokenElevationType = 3` independently vetoes the stale verdict.
+  2. `batfile\runas` and `cmdfile\runas` store an **already-expanded absolute
+     path** (`C:\WINDOWS\System32\cmd.exe /C "%1" %*`), not the `%SystemRoot%`
+     form, and its casing varies between installs. Exact-matching reported a
+     verb hijack on a clean machine. Only `exefile` gets an exact test now;
+     the others are checked structurally.
+
+  A diagnostic that cries hijack on a healthy machine is worse than no
+  diagnostic — it sends a tech hunting malware that was never there.
+
+  **Not yet bench-tested against a machine that genuinely cannot elevate.** The
+  ladder has only been run against healthy hardware, where its correct answer is
+  `NO BLOCKING CONDITION FOUND`. Every fault branch is unit-tested but none has
+  been seen in the wild, so treat rung findings as untried until one is.
 
 `BENCH-CHECKLIST.md` is a single ordered pass that closes the list below.
 It is grouped by blast radius — Tier A is safe on a working machine, Tier C is

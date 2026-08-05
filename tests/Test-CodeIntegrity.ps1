@@ -213,6 +213,45 @@ $v = Get-CiVerdict -Facts (New-CiFacts -Total 1514 -Policy 0 -Signing 756 -Polic
 Assert-True 'The customer shape verdicts as signing-level noise' ($v.State -eq 'SIGNING-LEVEL NOISE') ("got=" + $v.State)
 
 Write-Host ''
+Write-Host '  Known-noise annotation' -ForegroundColor Cyan
+Write-Host '  ----------------------' -ForegroundColor DarkGray
+
+# From a real ticket: 756 of 756 signing-level failures on one customer unit
+# were Apple Bonjour's Winsock namespace provider, which Windows tries to load
+# into every process that resolves a name.
+$note = Get-KnownNoiseNote -NormalizedPath '\Program Files\Bonjour\mdnsNSP.dll'
+Assert-True 'Bonjour mdnsNSP.dll is recognised' ($null -ne $note)
+if ($note) {
+    Assert-True 'It is identified as Bonjour' ($note.What -match 'Bonjour')
+    Assert-True 'And it says not to remove it' ($note.Do -match 'Leave it')
+}
+Assert-True 'Matching is case-insensitive' ($null -ne (Get-KnownNoiseNote -NormalizedPath '\x\MDNSNSP.DLL'))
+Assert-True 'An unrelated DLL is not annotated' ($null -eq (Get-KnownNoiseNote -NormalizedPath '\x\something.dll'))
+Assert-True 'An empty path does not throw' ($null -eq (Get-KnownNoiseNote -NormalizedPath ''))
+
+# The annotation must never touch the numbers. A name is forgeable, so a
+# known-noise match is a hint for the tech, not a licence for the module to
+# stop counting something.
+$before = Get-CiVerdict -Facts (New-CiFacts -Total 756 -Signing 756 -PolicyPresent $false)
+Assert-True 'Known noise does not change the verdict shape' ($before.State -eq 'SIGNING-LEVEL NOISE')
+# Scope the check to Get-CiVerdict's own body. The first attempt matched
+# from "function Get-CiVerdict" to the next occurrence of KnownNoise anywhere
+# in the file - which sits in Invoke-CodeIntegrityModule, further down - so it
+# reported a violation that was really just two functions in one file. A test
+# that cannot distinguish those is not testing the thing it names.
+$srcNoise = Get-Content -LiteralPath $ModulePath -Raw
+$vStart = $srcNoise.IndexOf('function Get-CiVerdict')
+Assert-True 'Get-CiVerdict is present to scope the check' ($vStart -ge 0)
+if ($vStart -ge 0) {
+    $rest = $srcNoise.Substring($vStart + 10)
+    $vEnd = $rest.IndexOf("`nfunction ")
+    if ($vEnd -lt 0) { $vEnd = $rest.Length }
+    $verdictBody = $rest.Substring(0, $vEnd)
+    Assert-True 'The noise table is not consulted by the verdict' `
+    ($verdictBody -notmatch 'KnownNoise')
+}
+
+Write-Host ''
 Write-Host '  Live breakdown' -ForegroundColor Cyan
 Write-Host '  --------------' -ForegroundColor DarkGray
 

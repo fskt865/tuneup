@@ -56,6 +56,40 @@ $script:SacMinimumBuild = 22621
 # Policy files Windows ships itself. Their presence is not a deployment.
 $script:StockPolicyFiles = @('driversipolicy.p7b')
 
+# Components that generate signing-level storms as a matter of course.
+#
+# This table ANNOTATES. It never suppresses a finding, never changes a count
+# and never changes the verdict - matching is on file NAME alone, which is the
+# weakest identification available and trivially forged. The signature status
+# and location printed beside it are what actually confirm the identification;
+# a name from this list sitting somewhere odd or failing its signature check is
+# more interesting than one that is not on the list at all.
+#
+# Entries go in only when confirmed on a real machine. A padded list of
+# half-remembered names would make the module confidently dismiss things it
+# has no business dismissing, which is the failure mode this file exists to
+# correct.
+$script:KnownNoisySources = @(
+    @{
+        File = 'mdnsnsp.dll'
+        What = 'Apple Bonjour - Winsock namespace provider'
+        Why  = 'Registered as a namespace provider, so Winsock tries to load it into every process that resolves a name. Hardened processes refuse it and log one event each. Apple signs it validly; it simply is not Microsoft-signed. Ships with iTunes, Apple Software Update, Adobe Creative Cloud and some printer software.'
+        Do   = 'Leave it. Removing Bonjour to quiet a log breaks AirPrint and Apple device discovery.'
+    }
+)
+
+function Get-KnownNoiseNote {
+    param([AllowNull()][string]$NormalizedPath)
+    if ([string]::IsNullOrWhiteSpace($NormalizedPath)) { return $null }
+    $leaf = ''
+    try { $leaf = [IO.Path]::GetFileName($NormalizedPath) } catch { return $null }
+    if (-not $leaf) { return $null }
+    foreach ($entry in $script:KnownNoisySources) {
+        if ($leaf.ToLowerInvariant() -eq $entry.File) { return $entry }
+    }
+    return $null
+}
+
 function Get-CiRegValue {
     param([string]$Path, [string]$Name)
     try {
@@ -572,6 +606,15 @@ function Invoke-CodeIntegrityModule {
             Write-Host ('             ids {0} | {1} | {2}{3}' -f `
                 (($s.Ids | Sort-Object) -join ','), $bucket, $facts.Signature,
                 $(if ($facts.Signer) { ' by ' + $facts.Signer } else { '' })) -ForegroundColor DarkGray
+
+            $note = Get-KnownNoiseNote -NormalizedPath $s.NormalizedPath
+            if ($note) {
+                Write-Host ('             KNOWN NOISE: {0}' -f $note.What) -ForegroundColor Green
+                Write-Host ('             {0}' -f $note.Why) -ForegroundColor DarkGray
+                Write-Host ('             {0}' -f $note.Do) -ForegroundColor DarkGray
+                Write-Host '             Matched on file name only - confirm the signature and' -ForegroundColor DarkGray
+                Write-Host '             location above before accepting it as this component.' -ForegroundColor DarkGray
+            }
         }
     }
 

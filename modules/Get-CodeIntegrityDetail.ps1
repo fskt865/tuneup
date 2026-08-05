@@ -229,6 +229,51 @@ function Get-CiSubjectPath {
 # ---------------------------------------------------------------------------
 # Is anything actually enforcing?
 # ---------------------------------------------------------------------------
+# Is a policy PRESENT, judged on an explicit evidence hierarchy.
+#
+# The hierarchy is the whole point, and getting it wrong has now cost two
+# rounds. Strongest to weakest:
+#
+#   1. Something is enforcing            - decisive, nothing else matters
+#   2. DeviceGuard reports its status    - 0/0 is a POSITIVE statement that
+#                                          nothing is applying a policy
+#   3. Policy files on disk              - the weakest signal there is
+#
+# A .p7b that no subsystem is applying is a file, not a policy. The first fix
+# stopped counting Windows' own driversipolicy.p7b, but left a single non-stock
+# file able to outvote DeviceGuard saying 0/0 and zero policy events in the
+# log - so the verdict still came back "policy present, check audit or
+# enforce" on a machine where demonstrably nothing was enforcing anything.
+# File presence is reported now, but it only decides the answer when the
+# stronger signals are unavailable.
+function Test-AnyPolicyPresent {
+    param(
+        [bool]$Enforcing,
+        [bool]$DeviceGuardReadable,
+        $KernelStatus,
+        $UserModeStatus,
+        [bool]$SacSupported,
+        $SacState,
+        [int]$PolicyFiles
+    )
+
+    if ($Enforcing) { return $true }
+
+    $sacEvaluating = ($SacSupported -and $SacState -eq 2)
+
+    # DeviceGuard answered, and it said nothing is on. Believe it.
+    if ($DeviceGuardReadable -and $KernelStatus -eq 0 -and $UserModeStatus -eq 0 -and -not $sacEvaluating) {
+        return $false
+    }
+
+    return (
+        ($KernelStatus -gt 0) -or
+        ($UserModeStatus -gt 0) -or
+        $sacEvaluating -or
+        ($PolicyFiles -gt 0)
+    )
+}
+
 function Get-CiEnforcementState {
     $WhatIfPreference = $false
 
@@ -315,13 +360,14 @@ function Get-CiEnforcementState {
         ($out.KernelPolicyStatus -eq 2) -or
         ($out.UserModePolicyStatus -eq 2)
     )
-    $out.AnyPolicyPresent = (
-        $out.AnyPolicyEnforcing -or
-        $out.ActivePolicyFiles -gt 0 -or
-        ($out.KernelPolicyStatus -gt 0) -or
-        ($out.UserModePolicyStatus -gt 0) -or
-        ($out.SacSupported -and $out.SacState -eq 2)
-    )
+    $out.AnyPolicyPresent = Test-AnyPolicyPresent `
+        -Enforcing $out.AnyPolicyEnforcing `
+        -DeviceGuardReadable $out.DeviceGuardReadable `
+        -KernelStatus $out.KernelPolicyStatus `
+        -UserModeStatus $out.UserModePolicyStatus `
+        -SacSupported $out.SacSupported `
+        -SacState $out.SacState `
+        -PolicyFiles $out.ActivePolicyFiles
 
     return $out
 }
@@ -537,9 +583,16 @@ function Invoke-CodeIntegrityModule {
     Write-Host ('     Deployed policies   : {0}{1}' -f $enf.ActivePolicyFiles,
         $(if ($enf.StockPolicyFiles -gt 0) { ('   (+{0} shipped by Windows, not a deployment)' -f $enf.StockPolicyFiles) } else { '' })) -ForegroundColor Gray
 
+    if (-not $enf.AnyPolicyPresent -and $enf.ActivePolicyFiles -gt 0) {
+        Write-Host ''
+        Write-Host ('     {0} policy file(s) exist on disk but nothing is applying them -' -f $enf.ActivePolicyFiles) -ForegroundColor DarkGray
+        Write-Host '     DeviceGuard reports enforcement off. A policy file no subsystem' -ForegroundColor DarkGray
+        Write-Host '     is applying is a file, not a policy.' -ForegroundColor DarkGray
+    }
+
     if (-not $enf.AnyPolicyPresent) {
         Write-Host ''
-        Write-Host '     NO CODE INTEGRITY POLICY IS PRESENT ON THIS MACHINE.' -ForegroundColor Green
+        Write-Host '     NO CODE INTEGRITY POLICY IS ENFORCING ON THIS MACHINE.' -ForegroundColor Green
         Write-Host '     Whatever is in the log below, it is not a policy refusing to run' -ForegroundColor Green
         Write-Host '     programs, because there is no policy. Read the counts in that' -ForegroundColor Green
         Write-Host '     light before drawing any conclusion from their size.' -ForegroundColor Green

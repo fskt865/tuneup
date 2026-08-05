@@ -198,6 +198,32 @@ Write-Host '  --------------------------------------' -ForegroundColor DarkGray
 Assert-True 'driversipolicy.p7b is on the stock list' `
 ($script:StockPolicyFiles -contains 'driversipolicy.p7b')
 
+# REGRESSION, round two, from the same customer unit. Excluding Windows' own
+# driversipolicy.p7b was not enough: ONE non-stock .p7b still outvoted
+# DeviceGuard reporting 0/0 and zero policy events, so the verdict came back
+# "policy present - check audit or enforce" on a machine where demonstrably
+# nothing was enforcing. The evidence hierarchy has to be explicit.
+Assert-True 'Enforcing beats everything' `
+(Test-AnyPolicyPresent -Enforcing $true -DeviceGuardReadable $true -KernelStatus 0 -UserModeStatus 0 -SacSupported $false -SacState $null -PolicyFiles 0)
+
+Assert-True 'DeviceGuard 0/0 outranks a policy file on disk' `
+(-not (Test-AnyPolicyPresent -Enforcing $false -DeviceGuardReadable $true -KernelStatus 0 -UserModeStatus 0 -SacSupported $false -SacState $null -PolicyFiles 1)) `
+'this is the exact customer shape'
+
+Assert-True 'Audit mode still counts as present' `
+(Test-AnyPolicyPresent -Enforcing $false -DeviceGuardReadable $true -KernelStatus 1 -UserModeStatus 0 -SacSupported $false -SacState $null -PolicyFiles 0)
+
+Assert-True 'SAC evaluation mode still counts as present' `
+(Test-AnyPolicyPresent -Enforcing $false -DeviceGuardReadable $true -KernelStatus 0 -UserModeStatus 0 -SacSupported $true -SacState 2 -PolicyFiles 0)
+
+# When the stronger signal is unavailable, the weak one is all there is and
+# must still be used - absence of DeviceGuard is not evidence of absence.
+Assert-True 'Without DeviceGuard, a policy file is the only evidence and counts' `
+(Test-AnyPolicyPresent -Enforcing $false -DeviceGuardReadable $false -KernelStatus $null -UserModeStatus $null -SacSupported $false -SacState $null -PolicyFiles 1)
+
+Assert-True 'Without DeviceGuard and without files, nothing is present' `
+(-not (Test-AnyPolicyPresent -Enforcing $false -DeviceGuardReadable $false -KernelStatus $null -UserModeStatus $null -SacSupported $false -SacState $null -PolicyFiles 0))
+
 $enfLive = Get-CiEnforcementState
 Assert-True 'Live: stock files are counted separately from deployments' `
 ($null -ne $enfLive.StockPolicyFiles)

@@ -662,6 +662,8 @@ function Get-RestrictionFindings {
         AppLockerRuleTypes   = @()
         AppLockerActive      = $false
         SmartAppControlState = $null
+        SacSupported         = $false
+        OsBuild              = 0
         DisallowRun          = $false
         RestrictRun          = $false
         RemovableDenyExecute = $false
@@ -693,6 +695,17 @@ function Get-RestrictionFindings {
     # Smart App Control / WDAC reputation policy. On Windows 11 this blocks
     # unsigned binaries with no UAC involvement whatsoever, and an unsigned
     # bench utility on a stick is precisely its target.
+    # Smart App Control needs Windows 11 22H2 (build 22621). Below that the
+    # registry value may still be absent OR present and meaningless, and
+    # naming the feature anyway is how this module produced a confident wrong
+    # answer on a Windows 10 machine.
+    try {
+        $osb = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+        $out.OsBuild = [int]$osb.BuildNumber
+    }
+    catch { }
+    $out.SacSupported = ($out.OsBuild -ge 22621)
+
     $sac = Read-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' -Name 'VerifiedAndReputablePolicyState'
     if ($sac.Present) { $out.SmartAppControlState = [int]$sac.Value }
 
@@ -936,8 +949,17 @@ function Get-ElevationEvents {
     param([int]$Days = 14)
     $WhatIfPreference = $false
 
+    # 3033/3034 and 3076/3077 are NOT the same finding and must never be added
+    # together. A signing-level failure is a load refused inside a process -
+    # usually an injection into something that will not accept it - and arrives
+    # in storms of hundreds on perfectly healthy machines. A WDAC policy event
+    # is a program actually being refused. Summing them produced a confident
+    # "734 binaries blocked by Smart App Control" on a Windows 10 machine that
+    # has no policy at all and cannot run Smart App Control. See the
+    # codeintegrity module, which exists because of that.
     $checks = @(
-        @{ Label = 'Code Integrity blocked a binary';   Log = 'Microsoft-Windows-CodeIntegrity/Operational'; Provider = 'Microsoft-Windows-CodeIntegrity'; Ids = @(3033, 3077) },
+        @{ Label = 'Code Integrity: WDAC policy block';   Log = 'Microsoft-Windows-CodeIntegrity/Operational'; Provider = 'Microsoft-Windows-CodeIntegrity'; Ids = @(3076, 3077, 3082) },
+        @{ Label = 'Code Integrity: signing-level fail';  Log = 'Microsoft-Windows-CodeIntegrity/Operational'; Provider = 'Microsoft-Windows-CodeIntegrity'; Ids = @(3033, 3034) },
         @{ Label = 'AppLocker blocked an executable';   Log = 'Microsoft-Windows-AppLocker/EXE and DLL';     Provider = 'Microsoft-Windows-AppLocker';     Ids = @(8004, 8007) },
         @{ Label = 'Software Restriction Policy block'; Log = 'Application';                                 Provider = 'Microsoft-Windows-SoftwareRestrictionPolicies'; Ids = @(865, 866, 867, 868) },
         @{ Label = 'A service failed to start or died'; Log = 'System';                                      Provider = 'Service Control Manager';         Ids = @(7000, 7023, 7031, 7034) },
@@ -1172,8 +1194,13 @@ function Get-ElevationVerdict {
     if ($Facts.SrpDefaultLevel -eq 0) {
         $causes += 'Software Restriction Policy default level is Disallowed - anything not explicitly allowed is blocked before UAC is consulted.'
     }
-    if ($Facts.CodeIntegrityBlocks -gt 0) {
-        $causes += ('Code Integrity has blocked ' + $Facts.CodeIntegrityBlocks + ' binaries recently - Smart App Control or WDAC, not UAC.')
+    # Only a WDAC policy event is a program being refused, and only when a
+    # policy is actually present. Signing-level failures are reported by the
+    # module but are deliberately NOT a cause: they run to hundreds on healthy
+    # machines, and calling them blocked binaries invented a fault complete
+    # with a named culprit that the OS did not even support.
+    if ($Facts.WdacBlocks -gt 0) {
+        $causes += ('A Code Integrity policy blocked or audited ' + $Facts.WdacBlocks + ' item(s) - the binary is refused before UAC is consulted. Run the codeintegrity module.')
     }
     if ($Facts.AppLockerBlocks -gt 0) {
         $causes += ('AppLocker has blocked ' + $Facts.AppLockerBlocks + ' executables recently.')
@@ -1472,7 +1499,10 @@ function Invoke-ElevationModule {
             Write-Host '     being enforced. Rules present does not mean rules applied.' -ForegroundColor DarkGray
         }
     }
-    if ($null -ne $restrict.SmartAppControlState) {
+    if (-not $restrict.SacSupported) {
+        Write-Host ('     Smart App Control : not available on build {0} (needs Windows 11 22H2)' -f $restrict.OsBuild) -ForegroundColor DarkGray
+    }
+    elseif ($null -ne $restrict.SmartAppControlState) {
         $sacText = 'off'
         if ($restrict.SmartAppControlState -eq 1) { $sacText = 'ON - blocks unsigned and unknown binaries' }
         elseif ($restrict.SmartAppControlState -eq 2) { $sacText = 'evaluation mode' }
@@ -1597,6 +1627,16 @@ function Invoke-ElevationModule {
     Write-Host '     Every query above names its provider as well as its ID. IDs are' -ForegroundColor DarkGray
     Write-Host '     only unique within a provider - counting them bare invents faults.' -ForegroundColor DarkGray
 
+    $signingFails = Get-EventCountByLabel -Label 'Code Integrity: signing-level fail'
+    if ($signingFails -gt 0) {
+        Write-Host ''
+        Write-Host ('     {0} signing-level load failures. Deliberately NOT counted as a' -f $signingFails) -ForegroundColor Cyan
+        Write-Host '     cause: these are loads refused inside a process, not programs' -ForegroundColor Cyan
+        Write-Host '     being blocked, and they run to hundreds on healthy machines.' -ForegroundColor Cyan
+        Write-Host '     Run the codeintegrity module to see what is repeating and' -ForegroundColor Cyan
+        Write-Host '     whether any policy is enforcing at all.' -ForegroundColor Cyan
+    }
+
     # --- verdict ----------------------------------------------------------
     $facts = [pscustomobject]@{
         TokenReadable       = $token.Readable
@@ -1616,7 +1656,8 @@ function Invoke-ElevationModule {
         ValidateAdminCodeSignatures = $validateSig
         RemovableDenyExecute = $restrict.RemovableDenyExecute
         SrpDefaultLevel     = $restrict.SrpDefaultLevel
-        CodeIntegrityBlocks = (Get-EventCountByLabel -Label 'Code Integrity blocked a binary')
+        WdacBlocks          = (Get-EventCountByLabel -Label 'Code Integrity: WDAC policy block')
+        SigningLevelFailures = (Get-EventCountByLabel -Label 'Code Integrity: signing-level fail')
         AppLockerBlocks     = (Get-EventCountByLabel -Label 'AppLocker blocked an executable')
         RunningStateMismatch = $tamper.RunningStateMismatch
         MismatchDetail      = $tamper.MismatchDetail

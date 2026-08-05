@@ -51,7 +51,8 @@ function New-HealthyFacts {
         ValidateAdminCodeSignatures = 0
         RemovableDenyExecute = $false
         SrpDefaultLevel     = $null
-        CodeIntegrityBlocks = 0
+        WdacBlocks          = 0
+        SigningLevelFailures = 0
         AppLockerBlocks     = 0
         RunningStateMismatch = $false
         MismatchDetail      = ''
@@ -231,6 +232,26 @@ Assert-True 'SRP default Disallowed is a cause' (($v.Causes -join ' ') -match 'S
 $f = New-HealthyFacts; $f.SrpDefaultLevel = 262144
 $v = Get-ElevationVerdict -Facts $f
 Assert-True 'A non-zero SRP default level is not a cause' (($v.Causes -join ' ') -notmatch 'Software Restriction')
+
+# REGRESSION, and the worst one so far because it reached a customer machine.
+# The module summed CodeIntegrity 3033 and 3077 and called the total "blocked
+# binaries - Smart App Control or WDAC". On a Windows 10 Home unit with no
+# policy of any kind that produced a confident cause naming a feature that
+# does not exist before Windows 11 22H2. Signing-level failures run to
+# hundreds on healthy machines and are not a program being refused.
+$f = New-HealthyFacts; $f.SigningLevelFailures = 734
+$v = Get-ElevationVerdict -Facts $f
+Assert-True 'Signing-level failures alone are NOT a cause' ($v.Causes.Count -eq 0) `
+("causes=" + ($v.Causes -join ' | '))
+Assert-True 'A healthy machine with a 3033 storm still verdicts clean' `
+($v.State -eq 'NO BLOCKING CONDITION FOUND') ("got=" + $v.State)
+Assert-True 'No verdict text mentions Smart App Control' `
+((($v.Causes -join ' ') -notmatch 'Smart App Control'))
+
+$f = New-HealthyFacts; $f.WdacBlocks = 3
+$v = Get-ElevationVerdict -Facts $f
+Assert-True 'WDAC policy blocks ARE a cause' (($v.Causes -join ' ') -match 'Code Integrity policy blocked')
+Assert-True 'And it points at the codeintegrity module' (($v.Causes -join ' ') -match 'codeintegrity')
 
 $f = New-HealthyFacts; $f.RunningStateMismatch = $true; $f.MismatchDetail = 'test detail'
 $v = Get-ElevationVerdict -Facts $f

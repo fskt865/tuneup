@@ -6,7 +6,7 @@ $here = $PSScriptRoot
 
 $suites = @('Test-Sanitizer.ps1', 'Test-Modules.ps1', 'Test-BrowserHijack.ps1',
     'Test-Startup.ps1', 'Test-Driver.ps1', 'Test-Evidence.ps1', 'Test-Network.ps1', 'Test-Crashes.ps1',
-    'Test-Elevation.ps1')
+    'Test-Elevation.ps1', 'Test-CodeIntegrity.ps1')
 $failed = @()
 
 foreach ($s in $suites) {

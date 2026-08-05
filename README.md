@@ -454,6 +454,53 @@ Read-only, with no `-Apply` half at all. UAC, SRP, AppLocker and WDAC are
 security configuration and often somebody's policy; it prints the exact command
 for each fix and stops.
 
+### codeintegrity
+
+**This module exists because the elevation module got it wrong on a customer
+machine.** Rung 8 summed CodeIntegrity events 3033 and 3077 and called the
+total "blocked binaries — Smart App Control or WDAC". On a Windows 10 Home
+unit with no policy of any kind, that produced a confident cause naming a
+feature that does not exist before Windows 11 22H2. The count was real; every
+word of the conclusion was wrong.
+
+That is the toolkit's own lesson one level up. It already knew an event ID
+means nothing without its **provider**. The same argument keeps going: an ID
+means nothing without its **semantics**, and without checking that the feature
+being blamed **exists on the OS in front of you**.
+
+The distinction the module is built around:
+
+| Events | What it actually is |
+|---|---|
+| 3033 / 3034 | A load failed a **signing level** requirement — typically an injection into a process that won't accept it. The program is still running. Storms of hundreds are unremarkable. |
+| 3076 / 3077 / 3082 | A **WDAC policy** audited or blocked something. *This* is a program being refused, and it can't happen without a policy present. |
+
+So it answers three questions in order, and nothing else is worth reading until
+they're settled: **is anything enforcing**, **what is actually in the log**, and
+**which file is repeating**. It checks the OS build before naming Smart App
+Control, reads `Win32_DeviceGuard` for real WDAC enforcement status, and counts
+active policy files — so "no policy is present" is a stated finding rather than
+an assumption.
+
+Blocked paths are an inventory of the customer's installed software, so they go
+to the **console only**. The report carries a count, a file extension and a
+location bucket (`Windows\System32`, `Program Files`, `user temp`, …) — never a
+path and never a file name.
+
+Two bugs caught before it shipped, both the same shape as the one it was written
+to fix:
+
+- **Windows paths contain spaces.** A pattern stopping at whitespace truncated
+  `\Program Files\Vendor\thing.dll` to `\Program`, which then had no extension,
+  was discarded as a non-binary, and made the parser name the *process* instead
+  of the file. Every event for one repeating DLL would land in its own bucket
+  and the concentration check — the whole point of the module — would report
+  noise. Anchored on the extension instead.
+- **Events naming no file were bucketed anyway**, so 171 unrelated
+  informational events on a healthy machine looked like one thing retrying in a
+  loop. They're counted now, never grouped, and concentration is judged only
+  against events that actually name a file.
+
 ### driver
 
 **This module does not roll back drivers**, and that is a finished decision.

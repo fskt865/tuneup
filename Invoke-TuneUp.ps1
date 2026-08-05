@@ -416,7 +416,7 @@ function Invoke-ModuleFromMenu {
 
     # Read-only modules have nothing to apply. Asking "apply fixes?" after one
     # implies there is a second half that changes something, and there is not.
-    if (@('crashes', 'evidence', 'elevation') -contains $Key) {
+    if (@('crashes', 'evidence', 'elevation', 'codeintegrity') -contains $Key) {
         Write-Host ''
         Write-Host '  This module is read-only - nothing to apply.' -ForegroundColor DarkGray
         if ($Key -eq 'evidence') {

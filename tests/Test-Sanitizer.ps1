@@ -43,6 +43,40 @@ Assert-True 'Map is sorted longest-literal-first' $ordered
 $tooShort = @($map | Where-Object { $_.Value.Length -lt 4 })
 Assert-True 'No literals shorter than 4 chars' ($tooShort.Count -eq 0) "count=$($tooShort.Count)"
 
+# REGRESSION. C:\Users holds built-in profiles as well as real accounts, and
+# feeding those into the map is worse than useless: they exist on every
+# install so they identify nobody, and "Default" and "Public" are ordinary
+# words that appear in report prose and in field names.
+#
+# The failure this pins was total, not cosmetic. A module returned a field
+# called Default; the word was redacted out of every VALUE, survived in the
+# JSON PROPERTY NAMES - which Protect-Object deliberately never rewrites,
+# because they are schema authored in this repo rather than data read off the
+# machine - and final verification then refused to write the report at all.
+# Correct behaviour from the write path, but nothing downstream could fix it.
+foreach ($builtin in @('Default', 'Public', 'All Users', 'Default User', 'WDAGUtilityAccount', 'Administrator')) {
+    $hit = @($map | Where-Object { $_.Value -eq $builtin })
+    Assert-True ("Built-in profile name '$builtin' is not treated as an account") ($hit.Count -eq 0)
+}
+
+# ...but the skip is whole-string, so a real account whose name merely starts
+# with one of them must still be redacted.
+$probe = 'The user Defaults and the user Publisher and IsDefault=true'
+$protected = Protect-String -Text $probe
+Assert-True 'The word Default is left alone in ordinary prose' ($protected -match 'IsDefault=true')
+Assert-True 'A field name containing Default survives redaction' ($protected -notmatch '<USER')
+
+# The end-to-end guarantee: schema-shaped output must verify clean. This is
+# the exact shape that failed - property names carrying the built-in words.
+$schemaProbe = [pscustomobject]@{
+    Default = 1; IsDefault = $true; SrpDefaultLevel = $null
+    PublicProfile = 'Public'; Note = 'not set - Windows default applies'
+}
+$json = Protect-Object -InputObject $schemaProbe | ConvertTo-Json -Depth 5
+$verify = Test-SanitizedText -Text $json
+Assert-True 'A report whose field names contain built-in words verifies clean' `
+    $verify.Clean ("hits=" + (($verify.Hits | Sort-Object -Unique) -join ','))
+
 # --- Live identifiers from this machine must not survive ----------------
 $live = @{
     'hostname'     = $env:COMPUTERNAME

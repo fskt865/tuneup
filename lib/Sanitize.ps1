@@ -13,6 +13,29 @@
 
 $script:RedactionMap = $null
 
+# Profile directories that exist on every Windows install and identify nobody.
+#
+# Same reasoning as the well-known SIDs below: these are machine-invariant, so
+# redacting them protects no one - and two of them are ordinary English words,
+# which makes redacting them actively harmful. "Default" appears in report
+# prose and in field names like IsDefault and SrpDefaultLevel; "Public" turns
+# up in any discussion of network profiles.
+#
+# This bit for real. A module returning a field called Default tripped the
+# final verification and the toolkit correctly refused to write the report -
+# correctly, but unfixably, because the surviving hits were JSON PROPERTY
+# NAMES and Protect-Object only ever rewrites values. Property names are
+# schema authored in this repo, never data read off the machine, so they must
+# not be redacted; the fix has to be keeping machine-invariant names out of
+# the map in the first place.
+#
+# Matched whole, case-insensitively, so a customer account called Publisher
+# or Defaults is still redacted normally.
+$script:BuiltInProfileNames = @(
+    'Default', 'Default User', 'Public', 'All Users',
+    'defaultuser0', 'WDAGUtilityAccount', 'Administrator'
+)
+
 function New-RedactionMap {
     $map = New-Object 'System.Collections.Generic.List[object]'
 
@@ -23,6 +46,9 @@ function New-RedactionMap {
         $s = $s.Trim()
         if ($s.Length -lt 4) { return }
         if ($s -match '^(To be filled|Default string|System Serial|None|N/A|00000000)') { return }
+        foreach ($builtin in $script:BuiltInProfileNames) {
+            if ($s -eq $builtin) { return }
+        }
         foreach ($existing in $map) { if ($existing.Value -eq $s) { return } }
         $map.Add([pscustomobject]@{ Value = $s; Token = $Token })
     }

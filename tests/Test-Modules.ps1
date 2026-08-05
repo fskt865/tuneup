@@ -80,6 +80,24 @@ $keys = @($mods | ForEach-Object { $_.Key })
 Assert-True 'Module keys are unique' (($keys | Sort-Object -Unique).Count -eq $keys.Count)
 
 Write-Host ''
+Write-Host '  Report-writing decision' -ForegroundColor Cyan
+Write-Host '  -----------------------' -ForegroundColor DarkGray
+
+# A scripted run must keep writing reports - things depend on that.
+Assert-True 'Scripted run writes a report' (Test-ShouldWriteReport -NoReport $false -Interactive $false)
+Assert-True '-NoReport beats a scripted run' (-not (Test-ShouldWriteReport -NoReport $true -Interactive $false))
+Assert-True '-NoReport beats an interactive yes' (-not (Test-ShouldWriteReport -NoReport $true -Interactive $true -Answer 'y'))
+
+# The menu defaults to NO, so an unanswered prompt leaves nothing behind.
+Assert-True 'Menu default (empty answer) writes nothing' (-not (Test-ShouldWriteReport -NoReport $false -Interactive $true -Answer ''))
+Assert-True 'Menu "n" writes nothing' (-not (Test-ShouldWriteReport -NoReport $false -Interactive $true -Answer 'n'))
+Assert-True 'Menu "y" writes' (Test-ShouldWriteReport -NoReport $false -Interactive $true -Answer 'y')
+Assert-True 'Menu "yes" writes' (Test-ShouldWriteReport -NoReport $false -Interactive $true -Answer 'YES')
+Assert-True 'Whitespace around the answer is tolerated' (Test-ShouldWriteReport -NoReport $false -Interactive $true -Answer '  y  ')
+# Anything that is not a yes must not be read as one.
+Assert-True 'A stray word is not a yes' (-not (Test-ShouldWriteReport -NoReport $false -Interactive $true -Answer 'yep'))
+
+Write-Host ''
 Write-Host '  Bloatware classification' -ForegroundColor Cyan
 Write-Host '  ------------------------' -ForegroundColor DarkGray
 

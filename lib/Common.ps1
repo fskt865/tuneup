@@ -49,6 +49,27 @@ function Write-Banner {
     Write-Log -Message "=== $Text ===" -Level STEP -Quiet
 }
 
+# Whether a report gets written. Pure, and it lives here rather than in
+# Invoke-TuneUp.ps1 so the test suite can reach it - that file executes on
+# dot-source and cannot be loaded for testing.
+#
+#   -NoReport always wins.
+#   A scripted run keeps the old behaviour and writes one, so nothing that
+#   already depends on a report appearing changes.
+#   The menu ASKS, and defaults to NO. Every action used to write a report
+#   whether or not anyone wanted it, which piled files onto the stick for
+#   read-only runs that existed only to be read off the screen.
+function Test-ShouldWriteReport {
+    param(
+        [bool]$NoReport,
+        [bool]$Interactive,
+        [string]$Answer = ''
+    )
+    if ($NoReport) { return $false }
+    if (-not $Interactive) { return $true }
+    return ($Answer -match '^\s*(y|yes)\s*$')
+}
+
 function Test-IsAdmin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
     $pr = New-Object Security.Principal.WindowsPrincipal($id)

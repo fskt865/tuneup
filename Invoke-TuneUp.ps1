@@ -40,7 +40,12 @@ param(
     [switch]$IncludeDrivers,
     [switch]$IncludeComponentCleanup,
     [string]$SourcePath,
-    [switch]$SkipEventLogs
+    [switch]$SkipEventLogs,
+
+    # Suppress the sanitized report entirely. Every action used to write one
+    # whether or not anyone wanted it, which piles reports onto the stick for
+    # read-only runs that were never going to be read.
+    [switch]$NoReport
 )
 
 # Deliberately NOT 'Stop'. This tool runs on machines where WMI classes are
@@ -77,6 +82,18 @@ $ToolkitVersion = 'unknown'
 $versionFile = Join-Path $Root 'VERSION'
 if (Test-Path -LiteralPath $versionFile) {
     $ToolkitVersion = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+}
+
+# Set only on the menu path. A run driven by -Action or -Module has no stdin
+# and must never be asked a question - see the Read-Host note at the bottom.
+$script:Interactive = $false
+
+function Show-LogFooter {
+    Write-Host ''
+    Write-Host ('  Verbose log: ' + $script:LogPath) -ForegroundColor DarkGray
+    Write-Host '  Logs and baselines stay on THIS machine, never on the stick -' -ForegroundColor DarkGray
+    Write-Host '  they are unsanitized. Option 7 removes them when the job is done.' -ForegroundColor DarkGray
+    Write-Host ''
 }
 
 function Show-Header {
@@ -375,7 +392,17 @@ function Invoke-Action {
             $merged | Add-Member -NotePropertyName 'ModuleOutcome' -NotePropertyValue $results.ModuleResult -Force
         }
 
-        Write-SanitizedReport -Report $merged | Out-Null
+        $answer = ''
+        if (-not $NoReport -and $script:Interactive) {
+            Write-Host ''
+            $answer = Read-Host '  Write a sanitized report to the stick? (y/N)'
+        }
+        if (Test-ShouldWriteReport -NoReport ([bool]$NoReport) -Interactive $script:Interactive -Answer $answer) {
+            Write-SanitizedReport -Report $merged | Out-Null
+        }
+        else {
+            Write-Host '  No report written.' -ForegroundColor DarkGray
+        }
     }
 
     if ($rebootNeeded) {
@@ -467,28 +494,70 @@ elseif ($Action) {
     Invoke-ActionSafely -Name $Action
 }
 else {
-    $choice = Show-Menu
-    switch ($choice) {
-        '1' { Invoke-ActionSafely -Name 'Report' }
-        '2' { Invoke-ActionSafely -Name 'Repair' }
-        '3' { Invoke-ActionSafely -Name 'Update' }
-        '4' { Invoke-ActionSafely -Name 'Clean' }
-        '5' { Invoke-ActionSafely -Name 'Full' }
-        '6' { $WhatIfPreference = $true; Invoke-ActionSafely -Name 'Full'; $WhatIfPreference = $false }
-        '7' { Invoke-ActionSafely -Name 'Purge' }
-        default {
-            $mods = Get-TuneUpModules -ModuleRoot $ModuleRoot
-            $hit = @($mods | Where-Object { $_.Key -eq $choice }) | Select-Object -First 1
-            if ($hit) { Invoke-ModuleFromMenu -Key $hit.Key }
-            else { Write-Host '  Nothing selected.' -ForegroundColor Gray }
+    # The menu is a LOOP. It used to run exactly one command and then close,
+    # so every second thing a tech wanted to do meant relaunching the toolkit
+    # from the stick and re-elevating. Q was listed but had no case and fell
+    # through to "Nothing selected", so the only documented way out did not
+    # work either.
+    $script:Interactive = $true
+    $running = $true
+    $emptyChoices = 0
+
+    while ($running) {
+        $choice = Show-Menu
+        $quit = $false
+
+        # Guard against a menu loop with no stdin. Read-Host returns empty
+        # forever if input is closed, which would spin this at full tilt.
+        if ([string]::IsNullOrWhiteSpace($choice)) {
+            $emptyChoices++
+            if ($emptyChoices -ge 3) {
+                Write-Host '  No input - closing.' -ForegroundColor Yellow
+                break
+            }
+            continue
+        }
+        $emptyChoices = 0
+
+        switch ($choice.Trim()) {
+            '1' { Invoke-ActionSafely -Name 'Report' }
+            '2' { Invoke-ActionSafely -Name 'Repair' }
+            '3' { Invoke-ActionSafely -Name 'Update' }
+            '4' { Invoke-ActionSafely -Name 'Clean' }
+            '5' { Invoke-ActionSafely -Name 'Full' }
+            '6' { $WhatIfPreference = $true; Invoke-ActionSafely -Name 'Full'; $WhatIfPreference = $false }
+            '7' { Invoke-ActionSafely -Name 'Purge' }
+            'Q' { $quit = $true }
+            default {
+                $mods = Get-TuneUpModules -ModuleRoot $ModuleRoot
+                $hit = @($mods | Where-Object { $_.Key -eq $choice.Trim() }) | Select-Object -First 1
+                if ($hit) { Invoke-ModuleFromMenu -Key $hit.Key }
+                else { Write-Host '  Nothing selected.' -ForegroundColor Gray }
+            }
+        }
+
+        if ($quit) { break }
+
+        Show-LogFooter
+        Read-Host '  Press Enter to return to the menu' | Out-Null
+    }
+
+    # Last chance to leave the machine as it was found. A tech who is done
+    # should not have to remember option 7 from a menu they have just left.
+    if (Test-Path -LiteralPath $script:LocalRoot) {
+        Write-Host ''
+        Write-Host '  This run left logs and baselines in:' -ForegroundColor Yellow
+        Write-Host ('    ' + $script:LocalRoot) -ForegroundColor Yellow
+        Write-Host '  They are unsanitized, which is exactly why they never went to the' -ForegroundColor DarkGray
+        Write-Host '  stick. Remove them if the job is finished.' -ForegroundColor DarkGray
+        $purge = Read-Host '  Remove them now? (y/N)'
+        if ($purge -match '^\s*(y|yes)\s*$') {
+            Invoke-ActionSafely -Name 'Purge'
+        }
+        else {
+            Write-Host '  Left in place. Option 7 removes them later.' -ForegroundColor DarkGray
         }
     }
 }
 
-Write-Host ''
-Write-Host ('  Verbose log: ' + $script:LogPath) -ForegroundColor DarkGray
-Write-Host '  That log stays on this machine. Option 7 purges it when the job is done.' -ForegroundColor DarkGray
-Write-Host ''
-# Only pause when we actually came through the menu. A non-interactive run
-# (-Action or -Module) has no stdin, and Read-Host there fails the whole script.
-if (-not $Action -and -not $Module) { Read-Host '  Press Enter to close' | Out-Null }
+if (-not $script:Interactive) { Show-LogFooter }

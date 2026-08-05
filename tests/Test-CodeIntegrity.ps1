@@ -187,6 +187,32 @@ Assert-True 'Signing failures WITH a policy present are hedged, not dismissed' `
 ($v.State -eq 'SIGNING-LEVEL FAILURES, POLICY PRESENT')
 
 Write-Host ''
+Write-Host '  Stock policy files are not a deployment' -ForegroundColor Cyan
+Write-Host '  --------------------------------------' -ForegroundColor DarkGray
+
+# REGRESSION from the customer machine. driversipolicy.p7b ships with Windows.
+# Counting it as a deployed policy made AnyPolicyPresent true on a unit with
+# WDAC status 0/0 and ZERO policy events, which pushed a correct
+# "SIGNING-LEVEL NOISE" verdict onto the hedged "policy present - check audit
+# or enforce" and would have sent a tech looking for a policy that isn't there.
+Assert-True 'driversipolicy.p7b is on the stock list' `
+($script:StockPolicyFiles -contains 'driversipolicy.p7b')
+
+$enfLive = Get-CiEnforcementState
+Assert-True 'Live: stock files are counted separately from deployments' `
+($null -ne $enfLive.StockPolicyFiles)
+if (-not $enfLive.AnyPolicyEnforcing -and $enfLive.ActivePolicyFiles -eq 0) {
+    Assert-True 'Live: no enforcement and no deployed policy means none present' `
+    (-not $enfLive.AnyPolicyPresent) `
+    ("active=" + $enfLive.ActivePolicyFiles + " stock=" + $enfLive.StockPolicyFiles)
+}
+
+# The exact customer shape: 756 signing-level, zero policy events, nothing
+# enforcing. Must read as noise, not as a policy question.
+$v = Get-CiVerdict -Facts (New-CiFacts -Total 1514 -Policy 0 -Signing 756 -PolicyPresent $false)
+Assert-True 'The customer shape verdicts as signing-level noise' ($v.State -eq 'SIGNING-LEVEL NOISE') ("got=" + $v.State)
+
+Write-Host ''
 Write-Host '  Live breakdown' -ForegroundColor Cyan
 Write-Host '  --------------' -ForegroundColor DarkGray
 

@@ -53,6 +53,9 @@ $script:CiProvider = 'Microsoft-Windows-CodeIntegrity'
 # anything older is how the elevation module got this wrong.
 $script:SacMinimumBuild = 22621
 
+# Policy files Windows ships itself. Their presence is not a deployment.
+$script:StockPolicyFiles = @('driversipolicy.p7b')
+
 function Get-CiRegValue {
     param([string]$Path, [string]$Name)
     try {
@@ -76,7 +79,7 @@ function Get-CiEventMeaning {
         '3076' { return 'WDAC policy AUDIT - would have been blocked' }
         '3077' { return 'WDAC policy BLOCK - the program was refused' }
         '3082' { return 'WDAC policy blocked a script or MSI' }
-        '3089' { return 'Signature detail for a preceding policy event' }
+        '3089' { return 'Signature detail for the preceding Code Integrity event (pairs 1:1, not a separate finding)' }
         '3099' { return 'A Code Integrity policy was loaded' }
         default { return 'other Code Integrity event' }
     }
@@ -206,6 +209,7 @@ function Get-CiEnforcementState {
         HvciEnabled            = $null
         VbsStatus              = $null
         ActivePolicyFiles      = 0
+        StockPolicyFiles       = 0
         AnyPolicyEnforcing     = $false
         AnyPolicyPresent       = $false
     }
@@ -246,15 +250,31 @@ function Get-CiEnforcementState {
         if ($null -ne $hv) { $out.HvciEnabled = ([int]$hv -eq 1) }
     }
 
-    # A deployed WDAC policy leaves files behind. No files plus no DeviceGuard
-    # enforcement means there is no policy to blame, full stop.
-    foreach ($dir in @("$env:SystemRoot\System32\CodeIntegrity\CiPolicies\Active", "$env:SystemRoot\System32\CodeIntegrity")) {
-        try {
-            $files = @(Get-ChildItem -LiteralPath $dir -Filter '*.p7b' -ErrorAction Stop)
-            $out.ActivePolicyFiles += $files.Count
-        }
-        catch { }
+    # A DEPLOYED policy leaves files behind. Windows also ships policy files of
+    # its own, and counting those as a deployment is a false signal that flips
+    # every downstream conclusion.
+    #
+    # driversipolicy.p7b is present on a stock Windows 10 install. Counting it
+    # made AnyPolicyPresent true on a machine with WDAC status 0/0 and zero
+    # policy events, which pushed the verdict off "signing-level noise" and
+    # onto the hedged "policy present, check audit or enforce" - sending a tech
+    # to inspect a policy that does not exist. Enforcement status and policy
+    # EVENTS are the real evidence; files on disk are the weakest of the three.
+    try {
+        $active = @(Get-ChildItem -LiteralPath "$env:SystemRoot\System32\CodeIntegrity\CiPolicies\Active" -Filter '*.p7b' -ErrorAction Stop)
+        $out.ActivePolicyFiles += $active.Count
     }
+    catch { }
+    try {
+        foreach ($f in @(Get-ChildItem -LiteralPath "$env:SystemRoot\System32\CodeIntegrity" -Filter '*.p7b' -ErrorAction Stop)) {
+            if ($script:StockPolicyFiles -contains $f.Name.ToLowerInvariant()) {
+                $out.StockPolicyFiles++
+                continue
+            }
+            $out.ActivePolicyFiles++
+        }
+    }
+    catch { }
 
     $out.AnyPolicyEnforcing = (
         ($out.SacSupported -and $out.SacState -eq 1) -or
@@ -480,7 +500,8 @@ function Invoke-CodeIntegrityModule {
         Write-Host '     WDAC policy status  : DeviceGuard WMI class not available on this edition' -ForegroundColor DarkGray
     }
     Write-Host ('     Memory integrity    : {0}' -f $(if ($null -eq $enf.HvciEnabled) { 'unknown' } else { $enf.HvciEnabled })) -ForegroundColor Gray
-    Write-Host ('     Active policy files : {0}' -f $enf.ActivePolicyFiles) -ForegroundColor Gray
+    Write-Host ('     Deployed policies   : {0}{1}' -f $enf.ActivePolicyFiles,
+        $(if ($enf.StockPolicyFiles -gt 0) { ('   (+{0} shipped by Windows, not a deployment)' -f $enf.StockPolicyFiles) } else { '' })) -ForegroundColor Gray
 
     if (-not $enf.AnyPolicyPresent) {
         Write-Host ''
@@ -601,6 +622,7 @@ function Invoke-CodeIntegrityModule {
         WdacUserModeStatus = $enf.UserModePolicyStatus
         HvciEnabled        = $enf.HvciEnabled
         ActivePolicyFiles  = $enf.ActivePolicyFiles
+        StockPolicyFiles   = $enf.StockPolicyFiles
         AnyPolicyPresent   = $enf.AnyPolicyPresent
         AnyPolicyEnforcing = $enf.AnyPolicyEnforcing
         LogReadable        = $brk.Readable

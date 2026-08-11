@@ -37,7 +37,9 @@ unresponsive for minutes.
 powershell -NoProfile -ExecutionPolicy Bypass -File D:\tuneup\tests\Run-AllTests.ps1
 ```
 
-Expect `ALL SUITES PASSED`, 382 assertions. Elevated runs exercise branches
+Expect `ALL SUITES PASSED` — 626 assertions as of v1.19.0, measured
+unelevated; the exact count moves as suites grow and a few branches skip by
+session type, so trust the PASS/FAIL verdict, not the number. Elevated runs exercise branches
 the unelevated suite skips — the live System-signed sweep and the thermal and
 driver-store reads.
 
@@ -190,6 +192,36 @@ seen in the wild — disabled `Appinfo`, an IFEO debugger on `consent.exe`, a
 denied standard user, a removable-execute policy. Those stay honestly untested
 until a real machine presents one. Do not induce them on your own machine to
 tick the box; the ones worth testing are the ones that walk in.
+
+### 7c. Triage — scripted first, then the menu walk with every fix skipped
+
+```bash
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\tuneup\Invoke-TuneUp.ps1 -Action Triage
+```
+
+Scripted is the safe half: full read-only scan, ranked findings, and the fix
+plan printed as commands. Verify it **applied nothing** — the plan section must
+say so in as many words. Unelevated, expect UNKNOWN findings for SMART and the
+component store; a blank must never read as a pass.
+
+Then from the menu (option 8, elevated via `RUN.cmd`), walk the fix prompts and
+**press Enter at every one**. Check specifically:
+
+- Every finding with a fix appears exactly once in the walk, with its reasons.
+- Enter skips, and the summary counts the skips honestly.
+- A fix needing elevation on an unelevated run says so instead of prompting.
+- If any disk finding is CRITICAL, heavy-I/O fixes demand `DATA IS SAFE` in
+  full, not `YES`.
+
+Actually typing YES exercises nothing new — every fix is a Tier B or C action
+this checklist already covers under its own step.
+
+**Closes:** the scan-everything pass, findings ranking, the consent walk, and
+scripted-run-applies-nothing.
+
+**Does NOT close:** the `DATA IS SAFE` gate on a genuinely failing disk — that
+stays untested until a machine with one is on the bench, and the right day to
+exercise it is a day the data is already recovered.
 
 ---
 

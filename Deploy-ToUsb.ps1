@@ -212,7 +212,7 @@ if (-not $WhatIfPreference) {
 
     if ($missing.Count -eq 0) {
         Write-Host ('  Deployed and verified: {0} file(s) present.' -f $expected.Count) -ForegroundColor Green
-        Write-Host '  Launch on the target machine with RUN.cmd.' -ForegroundColor Green
+        Write-Host '  On the target machine: TRIAGE.cmd for the whole picture, RUN.cmd for the menu.' -ForegroundColor Green
     }
     else {
         Write-Host ('  INCOMPLETE - {0} file(s) missing after copy:' -f $missing.Count) -ForegroundColor Red

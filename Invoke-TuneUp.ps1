@@ -9,7 +9,7 @@
 
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [ValidateSet('Report', 'Repair', 'Update', 'Clean', 'Full', 'Purge')]
+    [ValidateSet('Report', 'Repair', 'Update', 'Clean', 'Full', 'Purge', 'Triage')]
     [string]$Action,
 
     # Run a drop-in capability module from modules\ by its key.
@@ -45,7 +45,18 @@ param(
     # Suppress the sanitized report entirely. Every action used to write one
     # whether or not anyone wanted it, which piles reports onto the stick for
     # read-only runs that were never going to be read.
-    [switch]$NoReport
+    [switch]$NoReport,
+
+    # Write the run log to the toolkit's own logs\ directory instead of to
+    # ProgramData on the machine being worked on. The log is redacted line by
+    # line and the finished file is verified before the stick leaves.
+    #
+    # For jobs where writing to the unit is itself the problem: a suspect drive
+    # you may end up imaging, or a machine that has to be left untouched.
+    #
+    # It does NOT relocate resume state or the modules' undo backups - those
+    # stay local on purpose. See lib\Common.ps1.
+    [switch]$LogToStick
 )
 
 # Deliberately NOT 'Stop'. This tool runs on machines where WMI classes are
@@ -70,13 +81,39 @@ $script:ScriptBound = $PSBoundParameters
 . (Join-Path $Root 'lib\Common.ps1')
 . (Join-Path $Root 'lib\Sanitize.ps1')
 . (Join-Path $Root 'lib\Modules.ps1')
+. (Join-Path $Root 'lib\Triage.ps1')
 . (Join-Path $Root 'tasks\Collect-Report.ps1')
 . (Join-Path $Root 'tasks\Repair-ComponentStore.ps1')
 . (Join-Path $Root 'tasks\Invoke-WindowsUpdate.ps1')
 . (Join-Path $Root 'tasks\Clear-TempFiles.ps1')
+. (Join-Path $Root 'tasks\Invoke-Triage.ps1')
 
 $ReportDir = Join-Path $Root 'reports'
 $ModuleRoot = Join-Path $Root 'modules'
+
+# -LogToStick has to be wired before ANYTHING logs, or the first few lines land
+# in ProgramData and the whole point is lost.
+#
+# Refusing when the toolkit is running from the system drive is not pedantry:
+# "log to the stick" while running from C:\Users\...\Desktop\tuneup would write
+# the log to the very machine it was meant to keep clean, and the switch would
+# read as satisfied. Better to fail loudly than to quietly do the opposite.
+$LogDir = $null
+if ($LogToStick) {
+    $rootQualifier = ''
+    if ($Root -match '^([A-Za-z]:)') { $rootQualifier = $Matches[1] }
+
+    if ($rootQualifier -and $rootQualifier -ieq $env:SystemDrive) {
+        # Built as a variable first: 'throw (expr) -f args' is ambiguous enough
+        # that it is not worth relying on how it binds.
+        $msg = "-LogToStick was passed but the toolkit is running from '{0}', which is on the system drive ({1}). " +
+               "The log would land on the machine you are trying to keep clean. Run the toolkit from the stick instead."
+        throw ($msg -f $Root, $env:SystemDrive)
+    }
+
+    $LogDir = Join-Path $Root 'logs'
+    Set-LogDestination -Path $LogDir -Sanitize
+}
 
 $ToolkitVersion = 'unknown'
 $versionFile = Join-Path $Root 'VERSION'
@@ -91,8 +128,49 @@ $script:Interactive = $false
 function Show-LogFooter {
     Write-Host ''
     Write-Host ('  Verbose log: ' + $script:LogPath) -ForegroundColor DarkGray
-    Write-Host '  Logs and baselines stay on THIS machine, never on the stick -' -ForegroundColor DarkGray
-    Write-Host '  they are unsanitized. Option 7 removes them when the job is done.' -ForegroundColor DarkGray
+    if ($LogToStick) {
+        Write-Host '  That log is on the STICK, redacted line by line. Baselines and' -ForegroundColor DarkGray
+        Write-Host '  undo backups still stay on this machine - option 7 removes those.' -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host '  Logs and baselines stay on THIS machine, never on the stick -' -ForegroundColor DarkGray
+        Write-Host '  they are unsanitized. Option 7 removes them when the job is done.' -ForegroundColor DarkGray
+    }
+    Write-Host ''
+}
+
+# Verify a log that is about to leave on the stick, and destroy it if it cannot
+# be proven clean.
+#
+# A function rather than inline code because there are TWO exit paths - the
+# interactive menu and a scripted -Module/-Action run - and the scripted one is
+# exactly how this gets used for a quick read-only collection. Verifying on
+# only one path would leave unverified logs on the stick in the common case.
+function Invoke-StickLogVerification {
+    if (-not $LogToStick) { return }
+
+    $logCheck = Test-LogFileClean -RemoveIfDirty
+    Write-Host ''
+    if ($logCheck.Checked -and $logCheck.Clean) {
+        Write-Host '  Stick log verified clean:' -ForegroundColor Green
+        Write-Host ('    ' + $logCheck.Path) -ForegroundColor Green
+    }
+    elseif ($logCheck.Checked) {
+        Write-Host '  STICK LOG FAILED VERIFICATION - identifiers survived redaction:' -ForegroundColor Red
+        Write-Host ('    ' + ($logCheck.Hits -join ', ')) -ForegroundColor Red
+        if ($logCheck.Removed) {
+            Write-Host '  It has been DELETED from the stick. Nothing left the machine.' -ForegroundColor Red
+            Write-Host '  Re-run without -LogToStick if you need the detail locally.' -ForegroundColor DarkGray
+        }
+        else {
+            Write-Host '  DELETE FAILED. Remove it by hand before the stick leaves:' -ForegroundColor Red
+            Write-Host ('    ' + $logCheck.Path) -ForegroundColor Red
+        }
+    }
+    else {
+        Write-Host ('  Stick log NOT verified: ' + $logCheck.Reason) -ForegroundColor Yellow
+        Write-Host '  Treat it as unsanitized until you have checked it yourself.' -ForegroundColor Yellow
+    }
     Write-Host ''
 }
 
@@ -106,7 +184,15 @@ function Show-Header {
     if (Test-IsAdmin) { $adminText = 'Elevated'; $adminColor = 'Green' }
     Write-Host ('  Session:  ' + $adminText) -ForegroundColor $adminColor
     Write-Host ('  Toolkit:  ' + $Root) -ForegroundColor DarkGray
-    Write-Host ('  Logs:     ' + $script:LocalRoot + '  (stays on this machine)') -ForegroundColor DarkGray
+    # The header is where a tech checks what this run is going to do to the
+    # machine, so it must never describe a destination the run is not using.
+    if ($LogToStick) {
+        Write-Host ('  Logs:     ' + $LogDir + '  (on the stick, redacted)') -ForegroundColor Cyan
+        Write-Host '            Undo backups and resume state still go local.' -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host ('  Logs:     ' + $script:LocalRoot + '  (stays on this machine)') -ForegroundColor DarkGray
+    }
     Write-Host ''
 }
 
@@ -120,6 +206,10 @@ function Show-Menu {
     Write-Host ''
     Write-Host '   6  Dry run of the full tune-up      (prints the plan, writes nothing)' -ForegroundColor DarkGray
     Write-Host '   7  Purge logs and state from THIS machine' -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '   8  TRIAGE - scan everything, then ask before each fix' -ForegroundColor White
+    Write-Host '      (read-only scan of report + every module, ranked findings,' -ForegroundColor DarkGray
+    Write-Host '       one typed YES per fix - nothing applies in bulk)' -ForegroundColor DarkGray
     Write-Host ''
 
     $mods = Get-TuneUpModules -ModuleRoot $ModuleRoot
@@ -161,9 +251,15 @@ function Write-SanitizedReport {
 
     $verify = Test-SanitizedText -Text $json
     if (-not $verify.Clean) {
-        Write-Log -Message 'SANITIZER VERIFICATION FAILED - nothing written to the stick.' -Level FAIL
+        # Say what actually happened. The old wording here claimed the full
+        # report "stayed in the local log directory" - it does not, and never
+        # did. This path writes nothing anywhere, so that sent a tech hunting
+        # for a file that was never created, and implied an unsanitized copy
+        # was sitting on the customer's disk when none was.
+        Write-Log -Message 'SANITIZER VERIFICATION FAILED - nothing written, on the stick or anywhere else.' -Level FAIL
         Write-Log -Message ('Surviving identifiers: ' + ($verify.Hits -join ', ')) -Level FAIL
-        Write-Log -Message 'The full report stayed in the local log directory. Do not copy it off by hand.' -Level FAIL
+        Write-Log -Message 'The collected data was discarded. Nothing leaked, and there is no partial file to salvage.' -Level FAIL
+        Write-Log -Message 'Fix the redaction gap, then re-run the collection.' -Level FAIL
         return $null
     }
 
@@ -284,6 +380,30 @@ function Format-ReportText {
         Add-Line ''
     }
 
+    if ($Report.TriageFindings) {
+        Add-Line '-- Triage findings --'
+        Add-Line '  (UNKNOWN = check could not run, not a pass)'
+        if ($Report.TriageDataFirst) {
+            Add-Line '  DATA-FIRST MODE: a disk finding was critical. Heavy-I/O fixes were gated.'
+        }
+        foreach ($f in $Report.TriageFindings) {
+            Add-Line ('  [{0,-8}] {1,-12} {2}' -f $f.Severity, $f.Area, $f.Finding)
+            if ($f.Evidence) { Add-Line ('              ' + $f.Evidence) }
+            if ($f.Recommend) { Add-Line ('              -> ' + $f.Recommend) }
+        }
+        Add-Line ''
+    }
+
+    if ($Report.TriageOutcomes -and @($Report.TriageOutcomes).Count -gt 0) {
+        Add-Line '-- Triage fixes --'
+        foreach ($o in $Report.TriageOutcomes) {
+            $detail = ''
+            if ($o.Detail) { $detail = ' (' + $o.Detail + ')' }
+            Add-Line ('  {0,-20} {1}{2}' -f $o.Outcome, $o.Title, $detail)
+        }
+        Add-Line ''
+    }
+
     return $sb.ToString()
 }
 
@@ -338,6 +458,13 @@ function Invoke-Action {
             else { Write-Log 'Clean already completed this run - skipping (resume)' }
 
             $results.Report = Get-TuneUpReport -SkipEventLogs:$SkipEventLogs
+        }
+        'Triage' {
+            $t = Invoke-TuneUpTriage -ModuleRoot $ModuleRoot -Interactive:$script:Interactive
+            if ($t.RebootNeeded) { $rebootNeeded = $true }
+            # Findings and outcomes are already folded into the report object,
+            # so the sanitized file carries the whole story with no extra merge.
+            $results.Report = $t.Report
         }
         'Module' {
             $mods = Get-TuneUpModules -ModuleRoot $ModuleRoot
@@ -413,7 +540,10 @@ function Invoke-Action {
 }
 
 # ---------------------------------------------------------------------------
-Initialize-LocalRoot
+# Log root only. The local state/backup directory is created on demand by the
+# things that actually need it, so a read-only run with -LogToStick can finish
+# without creating anything at all on the machine being worked on.
+Initialize-LogRoot
 Write-Log -Message ("Session start. Elevated={0} Root={1}" -f (Test-IsAdmin), $Root) -Level STEP -Quiet
 
 function Invoke-ActionSafely {
@@ -527,6 +657,7 @@ else {
             '5' { Invoke-ActionSafely -Name 'Full' }
             '6' { $WhatIfPreference = $true; Invoke-ActionSafely -Name 'Full'; $WhatIfPreference = $false }
             '7' { Invoke-ActionSafely -Name 'Purge' }
+            '8' { Invoke-ActionSafely -Name 'Triage' }
             'Q' { $quit = $true }
             default {
                 $mods = Get-TuneUpModules -ModuleRoot $ModuleRoot
@@ -545,8 +676,15 @@ else {
     # Last chance to leave the machine as it was found. A tech who is done
     # should not have to remember option 7 from a menu they have just left.
     if (Test-Path -LiteralPath $script:LocalRoot) {
+        # Do not claim logs are here when -LogToStick sent them elsewhere. The
+        # directory still exists in that case for baselines and undo backups,
+        # and describing those as "logs" would send someone hunting for a file
+        # that is on the stick.
+        $leftBehind = 'logs and baselines'
+        if ($LogToStick) { $leftBehind = 'baselines and undo backups - the log went to the stick' }
+
         Write-Host ''
-        Write-Host '  This run left logs and baselines in:' -ForegroundColor Yellow
+        Write-Host ('  This run left ' + $leftBehind + ' in:') -ForegroundColor Yellow
         Write-Host ('    ' + $script:LocalRoot) -ForegroundColor Yellow
         Write-Host '  They are unsanitized, which is exactly why they never went to the' -ForegroundColor DarkGray
         Write-Host '  stick. Remove them if the job is finished.' -ForegroundColor DarkGray
@@ -558,6 +696,18 @@ else {
             Write-Host '  Left in place. Option 7 removes them later.' -ForegroundColor DarkGray
         }
     }
+
+    # LAST, deliberately. This has to run after the purge prompt above, because
+    # Purge logs as it works: verifying first would check a file and then append
+    # unverified lines to it, and the green "verified clean" would be about a
+    # file that no longer exists in the state it was checked in.
+    Invoke-StickLogVerification
 }
 
-if (-not $script:Interactive) { Show-LogFooter }
+if (-not $script:Interactive) {
+    Show-LogFooter
+    # A scripted run is the common way to do a quick read-only collection, so
+    # it needs the same verification the menu path gets. Without this, exactly
+    # the runs most likely to use -LogToStick would leave the stick unchecked.
+    Invoke-StickLogVerification
+}

@@ -31,9 +31,20 @@ $script:RedactionMap = $null
 #
 # Matched whole, case-insensitively, so a customer account called Publisher
 # or Defaults is still redacted normally.
+#
+# 'User' and 'Guest' added 2026-08-09 for the same reason as 'Default' and
+# 'Public'. "User" is the OEM default account name on a large fraction of
+# consumer machines, so it identifies nobody - and it is an ordinary English
+# word that appears throughout report prose. It is also, at exactly 4
+# characters, the shortest thing the length filter lets through, which is what
+# made it the literal that exposed the single-pass bug in Protect-String.
+#
+# Note the profile PATH is still redacted regardless, by the C:\Users\<name>
+# pattern below - so leaving the bare name in the map buys nothing anyway.
 $script:BuiltInProfileNames = @(
     'Default', 'Default User', 'Public', 'All Users',
-    'defaultuser0', 'WDAGUtilityAccount', 'Administrator'
+    'defaultuser0', 'WDAGUtilityAccount', 'Administrator',
+    'User', 'Guest'
 )
 
 function New-RedactionMap {
@@ -137,9 +148,49 @@ function Protect-String {
         if ($null -eq $script:RedactionMap) { New-RedactionMap | Out-Null }
 
         $out = $Text
-        foreach ($item in $script:RedactionMap) {
-            $out = [regex]::Replace($out, [regex]::Escape($item.Value), $item.Token, 'IgnoreCase')
+
+        # ONE pass over all literals, not one pass per literal.
+        #
+        # REGRESSION. The old loop re-scanned its own output. Every token
+        # contains the word USER, so a machine with an account literally named
+        # "User" - the OEM default, and exactly 4 characters so it survives the
+        # length filter - rewrote <USER1> into <<USER5>1> and C:\Users\ into
+        # C:\<USER5>s\. Verification then found the literal still present and
+        # correctly refused to write the report. On a default-named account
+        # that meant the toolkit could never produce a report at all.
+        #
+        # Longest-first ordering does NOT prevent this: it only protects
+        # literal-vs-literal collisions, and this is literal-vs-TOKEN. A single
+        # pass does prevent it, because each character position is consumed
+        # once and emitted tokens are never re-examined.
+        #
+        # The map's longest-first order is still load-bearing: .NET alternation
+        # is leftmost-FIRST, not leftmost-longest, so listing longer literals
+        # earlier is what makes the longest one win at a given position.
+        if (@($script:RedactionMap).Count -gt 0) {
+            $alternation = ($script:RedactionMap | ForEach-Object { [regex]::Escape($_.Value) }) -join '|'
+
+            $lookup = @{}
+            foreach ($item in $script:RedactionMap) {
+                $lookup[$item.Value.ToLowerInvariant()] = $item.Token
+            }
+
+            # GetNewClosure so the evaluator carries $lookup with it rather than
+            # depending on scope still being alive when the regex engine calls back.
+            $evaluator = {
+                param($m)
+                $hit = $lookup[$m.Value.ToLowerInvariant()]
+                # A miss should be impossible - the alternation is built from
+                # this same map. Fail closed anyway: returning the match would
+                # leak the literal, and returning $null would silently delete
+                # text from the report.
+                if ($null -eq $hit) { return '<REDACTED>' }
+                return $hit
+            }.GetNewClosure()
+
+            $out = [regex]::Replace($out, $alternation, $evaluator, 'IgnoreCase')
         }
+
         foreach ($p in $script:RedactionPatterns) {
             $out = [regex]::Replace($out, $p.Pattern, $p.Token)
         }
@@ -200,12 +251,42 @@ function Protect-Object {
 function Test-SanitizedText {
     param([Parameter(Mandatory = $true)][string]$Text)
 
+    # Remove every token we emit BEFORE scanning for surviving literals.
+    #
+    # REGRESSION, found alongside the single-pass fix above. This check used to
+    # scan its own output: the token vocabulary contains ordinary words, so an
+    # account named "User" matches inside <USER5> and one named "Host" matches
+    # inside <HOST>. Verification then reported a leak for text that had been
+    # redacted perfectly, and the write path correctly-but-uselessly refused to
+    # write any report at all.
+    #
+    # Removing exact token strings is safe because they are strings this file
+    # produces, never data read off the machine. Longest-first again, so
+    # <USERPROFILE> is consumed before <USER1> can bite a piece out of it.
+    $scan = $Text
+
+    $tokens = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($item in $script:RedactionMap) { $tokens.Add($item.Token) }
+    foreach ($p in $script:RedactionPatterns) { $tokens.Add($p.Token) }
+    # Emitted by Protect-String / Protect-Object but not present in either list.
+    $tokens.Add('<REDACTED>')
+    $tokens.Add('<TRUNCATED_DEPTH>')
+
+    foreach ($t in (@($tokens) | Select-Object -Unique | Sort-Object -Property Length -Descending)) {
+        if ($t) { $scan = $scan.Replace($t, '') }
+    }
+
     $hits = @()
     foreach ($item in $script:RedactionMap) {
-        if ($Text -match [regex]::Escape($item.Value)) { $hits += ('literal:' + $item.Token) }
+        # .Contains, not -match: the literal is data off the machine and may
+        # contain regex metacharacters. Same reasoning as the escaped pattern
+        # this replaces, minus the chance of forgetting the escape.
+        if ($scan.IndexOf($item.Value, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $hits += ('literal:' + $item.Token)
+        }
     }
     foreach ($p in $script:RedactionPatterns) {
-        if ($Text -match $p.Pattern) { $hits += ('pattern:' + $p.Token) }
+        if ($scan -match $p.Pattern) { $hits += ('pattern:' + $p.Token) }
     }
 
     return [pscustomobject]@{

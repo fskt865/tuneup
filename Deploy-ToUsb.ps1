@@ -112,6 +112,9 @@ Write-Host ''
 # reports directory on the stick is an OUTPUT, populated in the field.
 $items = @(
     @{ Src = 'RUN.cmd';           Dst = 'RUN.cmd' },
+    # Same launcher with -LogToStick, for jobs where nothing may be written to
+    # the unit. See the header in that file for what it does and does not move.
+    @{ Src = 'RUN-STICKLOG.cmd';  Dst = 'RUN-STICKLOG.cmd' },
     @{ Src = 'Invoke-TuneUp.ps1'; Dst = 'Invoke-TuneUp.ps1' },
     @{ Src = 'README.md';         Dst = 'README.md' },
     @{ Src = 'BENCH-CHECKLIST.md'; Dst = 'BENCH-CHECKLIST.md' },
@@ -241,5 +244,37 @@ if (-not $WhatIfPreference) {
             foreach ($s in $staleOther) { Write-Host ('    ' + $s) -ForegroundColor Yellow }
         }
     }
+
+    # Index and history artifacts left on the stick by a search tool.
+    #
+    # These would already show up in the stale list above, in yellow, among
+    # ordinary clutter. They are not ordinary clutter: an Everything.db is a
+    # complete listing of every filename on the last machine it ran against,
+    # and it is sitting on a stick that goes to the next customer. Named
+    # explicitly, in red, and checked on every deploy - a deploy is the last
+    # moment before the stick leaves the bench.
+    #
+    # tools\Everything\SEARCH.cmd exists to prevent this by passing -nodb. If
+    # anything is listed here, the exe was launched directly.
+    $indexHits = @()
+    $stickTools = Join-Path $target 'tools'
+    if (Test-Path -LiteralPath $stickTools) {
+        $indexHits = @(Get-ChildItem -LiteralPath $stickTools -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'Everything*.db' -or $_.Name -like '*History.csv' })
+    }
+    if ($indexHits.Count -gt 0) {
+        Write-Host ''
+        Write-Host ('  {0} SEARCH INDEX / HISTORY FILE(S) ON THIS STICK:' -f $indexHits.Count) -ForegroundColor Red
+        foreach ($f in $indexHits) {
+            Write-Host ('    {0}  ({1} MB)' -f $f.FullName, [math]::Round($f.Length / 1MB, 1)) -ForegroundColor Red
+        }
+        Write-Host '  An index is a full filename listing of the machine it was built on.' -ForegroundColor Yellow
+        Write-Host '  It is customer data and it must not leave on the stick. Delete it:' -ForegroundColor Yellow
+        foreach ($f in $indexHits) {
+            Write-Host ('    Remove-Item -LiteralPath "{0}" -Force' -f $f.FullName) -ForegroundColor Gray
+        }
+        Write-Host '  Then launch Everything from SEARCH.cmd next time, not the exe.' -ForegroundColor Yellow
+    }
+
     Write-Host ''
 }

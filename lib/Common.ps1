@@ -1,20 +1,69 @@
 # Common.ps1 - shared helpers for the tune-up toolkit.
 # Dot-sourced by Invoke-TuneUp.ps1. ASCII only, PowerShell 5.1 compatible.
 
-# Verbose logs and resume state live on the LOCAL machine, never on the stick.
-# The stick only ever receives the sanitized report. See README.md.
-$script:LocalRoot  = Join-Path $env:ProgramData 'GSTuneUp'
-$script:LogPath    = $null
-$script:StatePath  = Join-Path $script:LocalRoot 'state.json'
+# Verbose logs and resume state live on the LOCAL machine by default, never on
+# the stick. The stick only ever receives the sanitized report. See README.md.
+#
+# -LogToStick moves THE LOG AND ONLY THE LOG onto the stick, redacted line by
+# line and verified before the stick leaves. It exists for jobs where writing
+# to the machine is itself undesirable - a suspect drive you may end up
+# imaging, or a unit that must be left byte-identical.
+#
+# Resume state and the undo backups modules write (hw-baseline.json,
+# startup-backup.json, browser-backup, the ipconfig capture) stay local no
+# matter what. They exist to put a machine back the way it was found, and a
+# backup that leaves in someone's pocket cannot do that. Splitting the two is
+# the whole point: the log is the part that is unsanitized and disposable, the
+# backups are the part that is sanitized-irrelevant and load-bearing.
+$script:LocalRoot   = Join-Path $env:ProgramData 'GSTuneUp'
+$script:LogRoot     = $null      # falls back to LocalRoot
+$script:LogPath     = $null
+$script:LogSanitize = $false
+$script:StatePath   = Join-Path $script:LocalRoot 'state.json'
 
-function Initialize-LocalRoot {
-    if (-not (Test-Path -LiteralPath $script:LocalRoot)) {
-        New-Item -ItemType Directory -Path $script:LocalRoot -Force | Out-Null
+# Call once, early, before anything logs. Re-pointing the root clears LogPath
+# so the stamped filename is recreated under the new root rather than the old
+# name being reused in a new place.
+function Set-LogDestination {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$Sanitize
+    )
+    $script:LogRoot     = $Path
+    $script:LogPath     = $null
+    $script:LogSanitize = [bool]$Sanitize
+}
+
+function Get-LogDestination {
+    if (-not $script:LogRoot) { return $script:LocalRoot }
+    return $script:LogRoot
+}
+
+function Test-LogIsSanitized { return $script:LogSanitize }
+
+function Initialize-LogRoot {
+    if (-not $script:LogRoot) { $script:LogRoot = $script:LocalRoot }
+    if (-not (Test-Path -LiteralPath $script:LogRoot)) {
+        # -WhatIf:$false to match the Add-Content below. Without it a dry run
+        # skips the mkdir and then every log line fails against a directory
+        # that was never created.
+        New-Item -ItemType Directory -Path $script:LogRoot -Force -WhatIf:$false | Out-Null
     }
     if (-not $script:LogPath) {
         $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
-        $script:LogPath = Join-Path $script:LocalRoot ("run-$stamp.log")
+        $script:LogPath = Join-Path $script:LogRoot ("run-$stamp.log")
     }
+}
+
+# The local state/backup directory, created ON DEMAND by the things that
+# genuinely need it. Deliberately no longer called at startup: with the log on
+# the stick, a read-only run must be able to finish without creating anything
+# on the machine at all.
+function Initialize-LocalRoot {
+    if (-not (Test-Path -LiteralPath $script:LocalRoot)) {
+        New-Item -ItemType Directory -Path $script:LocalRoot -Force -WhatIf:$false | Out-Null
+    }
+    if (-not $script:LogPath) { Initialize-LogRoot }
 }
 
 function Write-Log {
@@ -23,8 +72,29 @@ function Write-Log {
         [ValidateSet('INFO', 'WARN', 'FAIL', 'OK', 'STEP')][string]$Level = 'INFO',
         [switch]$Quiet
     )
-    Initialize-LocalRoot
-    $line = '{0} [{1}] {2}' -f (Get-Date).ToString('HH:mm:ss'), $Level, $Message
+    Initialize-LogRoot
+
+    # One timestamp for both renderings. Formatting twice can straddle a second
+    # boundary and print a console line that does not match its own log entry.
+    $stamp = (Get-Date).ToString('HH:mm:ss')
+
+    # The console belongs to the tech standing at the machine and always shows
+    # the real text - account names and paths are exactly what they need to
+    # read. The FILE is the thing that can leave, so only the file is redacted.
+    # Same split the elevation module already makes for group member names.
+    $forFile = $Message
+    if ($script:LogSanitize) {
+        if (Get-Command -Name Protect-String -CommandType Function -ErrorAction SilentlyContinue) {
+            $forFile = Protect-String -Text $Message
+        }
+        else {
+            # Refuse rather than leak. If the sanitizer is not loaded we cannot
+            # redact, and an unredacted line does not go onto removable media.
+            $forFile = '[line suppressed - sanitizer not loaded]'
+        }
+    }
+
+    $line = '{0} [{1}] {2}' -f $stamp, $Level, $forFile
     # -WhatIf:$false deliberately. Logging is bookkeeping, not an effect the
     # user is deciding about - and a dry run that produces no log is useless
     # for working out what the real run would have done.
@@ -36,8 +106,52 @@ function Write-Log {
         if ($Level -eq 'FAIL') { $color = 'Red' }
         if ($Level -eq 'OK')   { $color = 'Green' }
         if ($Level -eq 'STEP') { $color = 'Cyan' }
-        Write-Host $line -ForegroundColor $color
+        Write-Host ('{0} [{1}] {2}' -f $stamp, $Level, $Message) -ForegroundColor $color
     }
+}
+
+# End-of-run check on a log that is about to leave on the stick.
+#
+# Per-line redaction has no equivalent of the report writer's "verify, then
+# refuse to write" moment - by the time a bad line is written it is already on
+# disk. So the equivalent happens here: scan the finished file and delete it if
+# anything identifying survived. A log that cannot be PROVEN clean does not
+# travel. Returns three states, never two: not checked / clean / dirty.
+function Test-LogFileClean {
+    param([switch]$RemoveIfDirty)
+
+    $result = [pscustomobject]@{
+        Checked = $false
+        Clean   = $false
+        Hits    = @()
+        Path    = $script:LogPath
+        Removed = $false
+        Reason  = ''
+    }
+
+    if (-not $script:LogSanitize) { $result.Reason = 'log is local and unsanitized by design'; return $result }
+    if (-not $script:LogPath -or -not (Test-Path -LiteralPath $script:LogPath)) {
+        $result.Reason = 'no log file'
+        return $result
+    }
+    if (-not (Get-Command -Name Test-SanitizedText -CommandType Function -ErrorAction SilentlyContinue)) {
+        $result.Reason = 'verifier not loaded - CANNOT confirm this log is clean'
+        return $result
+    }
+
+    $text = Get-Content -LiteralPath $script:LogPath -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $text) { $result.Reason = 'log unreadable'; return $result }
+
+    $v = Test-SanitizedText -Text $text
+    $result.Checked = $true
+    $result.Clean   = $v.Clean
+    $result.Hits    = @($v.Hits)
+
+    if (-not $v.Clean -and $RemoveIfDirty) {
+        Remove-Item -LiteralPath $script:LogPath -Force -ErrorAction SilentlyContinue -WhatIf:$false
+        $result.Removed = -not (Test-Path -LiteralPath $script:LogPath)
+    }
+    return $result
 }
 
 function Write-Banner {

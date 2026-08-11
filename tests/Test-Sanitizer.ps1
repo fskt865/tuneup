@@ -54,10 +54,76 @@ Assert-True 'No literals shorter than 4 chars' ($tooShort.Count -eq 0) "count=$(
 # because they are schema authored in this repo rather than data read off the
 # machine - and final verification then refused to write the report at all.
 # Correct behaviour from the write path, but nothing downstream could fix it.
-foreach ($builtin in @('Default', 'Public', 'All Users', 'Default User', 'WDAGUtilityAccount', 'Administrator')) {
+foreach ($builtin in @('Default', 'Public', 'All Users', 'Default User', 'WDAGUtilityAccount', 'Administrator', 'User', 'Guest')) {
     $hit = @($map | Where-Object { $_.Value -eq $builtin })
     Assert-True ("Built-in profile name '$builtin' is not treated as an account") ($hit.Count -eq 0)
 }
+
+# --- REGRESSION: a literal must never rewrite an emitted TOKEN -----------
+#
+# Found in the field 2026-08-09. Replacements used to run one pass per literal,
+# so each pass re-scanned the previous pass's output. Every token contains the
+# word USER, so an account literally named "User" - the OEM default, and
+# exactly 4 characters so it survives the length filter - turned <USER1> into
+# <<USER5>1> and C:\Users\ into C:\<USER5>s\. Verification then found the
+# literal still present and refused to write, so the toolkit could not produce
+# a report at all on a machine with a default account name.
+#
+# Longest-first sorting does not help: this is literal-vs-token, not
+# literal-vs-literal. Only a single pass fixes it.
+$savedMap = $script:RedactionMap
+$script:RedactionMap = @(
+    [pscustomobject]@{ Value = 'JenniferLongName'; Token = '<USER1>' }
+    [pscustomobject]@{ Value = 'MarcusOther';      Token = '<USER2>' }
+    [pscustomobject]@{ Value = 'User';             Token = '<USER5>' }
+)
+
+$mangled = Protect-String -Text 'JenniferLongName and MarcusOther both exist'
+Assert-True 'A short literal does not rewrite emitted tokens' `
+    ($mangled -notmatch '<<') "got=$mangled"
+Assert-True 'Long literals still map to their own tokens' `
+    (($mangled -match '<USER1>') -and ($mangled -match '<USER2>')) "got=$mangled"
+
+$verifyTok = Test-SanitizedText -Text $mangled
+Assert-True 'Output with a token-colliding literal verifies clean' `
+    $verifyTok.Clean ("hits=" + ($verifyTok.Hits -join ','))
+
+# The literal itself must still be redacted when it genuinely appears.
+$plain = Protect-String -Text 'the User account'
+Assert-True 'A colliding literal is still redacted in ordinary text' ($plain -match '<USER5>') "got=$plain"
+
+# Substring matching mid-word is DELIBERATE and stays - an account name
+# embedded in a longer string still has to be caught. With 'User' forced into
+# the map here it does chew "Users" into "<USER5>s", which is ugly but not a
+# leak; the real defence is that 'User' is excluded from the map in the first
+# place (asserted in the built-in loop above). What must hold either way is
+# that the result still VERIFIES, rather than the tool refusing to write.
+$pathProbe = Protect-String -Text 'C:\Users\MarcusOther\AppData'
+Assert-True 'A mid-word literal match does not nest tokens' ($pathProbe -notmatch '<<') "got=$pathProbe"
+Assert-True 'A mid-word literal match still verifies clean' `
+    ((Test-SanitizedText -Text $pathProbe).Clean) "got=$pathProbe"
+
+# --- REGRESSION: verification must not flag its own tokens ---------------
+#
+# Second half of the same field failure. Test-SanitizedText scanned the text it
+# had just redacted, and the token vocabulary contains ordinary words - "User"
+# lives inside <USER5>, "Host" inside <HOST>. Verification reported a leak for
+# perfectly redacted text, and the write path refused to write anything.
+$script:RedactionMap = @(
+    [pscustomobject]@{ Value = 'Host'; Token = '<USER1>' }
+    [pscustomobject]@{ Value = 'RealAccountName'; Token = '<USER2>' }
+)
+$hostProbe = Protect-String -Text 'RealAccountName signed in'
+Assert-True 'A literal appearing inside a token is not a leak' `
+    ((Test-SanitizedText -Text $hostProbe).Clean) "got=$hostProbe"
+
+# ...but a genuine survivor must still be caught. This is the check that makes
+# the token-stripping above safe rather than a hole punched in verification.
+$leak = 'RealAccountName was not redacted'
+Assert-True 'A genuinely surviving literal is still detected' `
+    (-not (Test-SanitizedText -Text $leak).Clean) "got=$leak"
+
+$script:RedactionMap = $savedMap
 
 # ...but the skip is whole-string, so a real account whose name merely starts
 # with one of them must still be redacted.

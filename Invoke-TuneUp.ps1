@@ -47,6 +47,12 @@ param(
     # read-only runs that were never going to be read.
     [switch]$NoReport,
 
+    # Triage only: walk the fix prompts after the scan. TRIAGE.cmd passes
+    # this so a double-click gets the ask-before-every-fix flow without the
+    # menu. Without it a scripted -Action Triage stays scan-and-plan only,
+    # because a run with no console must never be asked a question.
+    [switch]$Walk,
+
     # Write the run log to the toolkit's own logs\ directory instead of to
     # ProgramData on the machine being worked on. The log is redacted line by
     # line and the finished file is verified before the stick leaves.
@@ -460,7 +466,7 @@ function Invoke-Action {
             $results.Report = Get-TuneUpReport -SkipEventLogs:$SkipEventLogs
         }
         'Triage' {
-            $t = Invoke-TuneUpTriage -ModuleRoot $ModuleRoot -Interactive:$script:Interactive
+            $t = Invoke-TuneUpTriage -ModuleRoot $ModuleRoot -Interactive:($script:Interactive -or $Walk)
             if ($t.RebootNeeded) { $rebootNeeded = $true }
             # Findings and outcomes are already folded into the report object,
             # so the sanitized file carries the whole story with no extra merge.

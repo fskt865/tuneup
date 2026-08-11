@@ -112,6 +112,8 @@ Write-Host ''
 # reports directory on the stick is an OUTPUT, populated in the field.
 $items = @(
     @{ Src = 'RUN.cmd';           Dst = 'RUN.cmd' },
+    # The no-choices front door: elevate, scan everything, ask per fix.
+    @{ Src = 'TRIAGE.cmd';        Dst = 'TRIAGE.cmd' },
     # Same launcher with -LogToStick, for jobs where nothing may be written to
     # the unit. See the header in that file for what it does and does not move.
     @{ Src = 'RUN-STICKLOG.cmd';  Dst = 'RUN-STICKLOG.cmd' },

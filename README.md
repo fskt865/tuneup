@@ -50,9 +50,16 @@ only and never echoes a value it found.
 
 ## Use
 
-Launch `RUN.cmd` from the stick. It self-elevates and bypasses execution policy,
-which is what you need on a machine whose policy is Restricted and whose drive
-letter is not the one you had last time.
+**Whole-picture pass: double-click `TRIAGE.cmd`.** No menu, no choices up
+front - it elevates, scans everything read-only (core report plus every
+module), ranks the findings, then asks before each fix, one typed `YES` at a
+time, and closes with what else is on the stick for the hands-on half.
+(Windows has not allowed a stick to run anything by itself on insert since
+Windows 7 - the double-click is the floor, deliberately including the OS's.)
+
+For running one thing on its own, launch `RUN.cmd` - the menu. It self-elevates
+and bypasses execution policy, which is what you need on a machine whose policy
+is Restricted and whose drive letter is not the one you had last time.
 
 ```
 1  Collect diagnostic report        read-only, safe on anything

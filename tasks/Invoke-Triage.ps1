@@ -69,6 +69,8 @@ function Invoke-TuneUpTriage {
         if ($o.RebootNeeded) { $rebootNeeded = $true }
     }
 
+    Show-TriageToolbox -ToolkitRoot (Split-Path -Parent $ModuleRoot) -Findings $findings
+
     # --- Fold into the report -------------------------------------------
     # Strings only: the report is the thing that leaves on the stick, and
     # every one of these lines is built from fields the sanitizer already
@@ -162,6 +164,70 @@ function Show-TriageFixPlanScripted {
             Write-Host '    GATED: heavy I/O with a critical disk finding. Data first.' -ForegroundColor Red
         }
         Write-Host ('    ' + $p.Command) -ForegroundColor White
+        Write-Host ''
+    }
+}
+
+# What else is on this stick, said at the moment it is useful: right after
+# the findings, when the tech is deciding what to do next. Everything listed
+# is checked for on disk first - a tool that is not there is not offered.
+function Show-TriageToolbox {
+    param(
+        [Parameter(Mandatory = $true)][string]$ToolkitRoot,
+        $Findings = @()
+    )
+
+    $toolsDir = Join-Path $ToolkitRoot 'tools'
+    $isoDir = Join-Path (Split-Path -Parent $ToolkitRoot) 'iso'
+
+    $toolNotes = @(
+        @{ Dir = 'smartmontools'; Note = 'smartctl --scan first, then -d <type> it reports; reads SMART through most USB bridges' },
+        @{ Dir = 'CrystalDiskInfo'; Note = 'second opinion on drive health, GUI' },
+        @{ Dir = 'LibreHardwareMonitor'; Note = 'temperatures, fans and clocks; the evidence module drives it' },
+        @{ Dir = 'Everything'; Note = 'launch via SEARCH.cmd, never the exe - the launcher keeps the index off this stick' }
+    )
+
+    $haveTools = @()
+    foreach ($t in $toolNotes) {
+        if (Test-Path -LiteralPath (Join-Path $toolsDir $t.Dir)) { $haveTools += $t }
+    }
+
+    $isos = @()
+    if (Test-Path -LiteralPath $isoDir) {
+        $isos = @(Get-ChildItem -LiteralPath $isoDir -Filter '*.iso' -ErrorAction SilentlyContinue)
+    }
+
+    if ($haveTools.Count -eq 0 -and $isos.Count -eq 0) { return }
+
+    Write-Banner 'Also on this stick'
+
+    if ($haveTools.Count -gt 0) {
+        Write-Host '  Hands-on tools (tools\):' -ForegroundColor White
+        foreach ($t in $haveTools) {
+            Write-Host ('    {0,-22} {1}' -f $t.Dir, $t.Note) -ForegroundColor Gray
+        }
+        Write-Host ''
+    }
+
+    if ($isos.Count -gt 0) {
+        Write-Host '  Bootable (reboot, pick this stick in the boot menu, Ventoy lists these):' -ForegroundColor White
+        foreach ($i in $isos) {
+            $note = ''
+            if ($i.Name -match 'systemrescue') { $note = 'Linux rescue: ddrescue, testdisk/photorec, GParted - the data-first toolbox' }
+            if ($i.Name -match 'mt86|memtest') { $note = 'memory test - the answer to crashes no module can attribute' }
+            if ($i.Name -match 'HBCD|hiren') { $note = 'Windows PE bench environment - repairs when the installed OS will not boot' }
+            Write-Host ('    {0,-34} {1}' -f $i.Name, $note) -ForegroundColor Gray
+        }
+        $diskCritical = $false
+        foreach ($f in @($Findings)) {
+            if ($f.Severity -eq 'CRITICAL' -and $f.Area -eq 'Disk') { $diskCritical = $true }
+        }
+        if ($diskCritical) {
+            Write-Host ''
+            Write-Host '  With the disk finding above: boot SystemRescue and get the data off' -ForegroundColor Yellow
+            Write-Host '  with ddrescue BEFORE any repair here. The booted OS does not touch' -ForegroundColor Yellow
+            Write-Host '  the patient disk unless told to.' -ForegroundColor Yellow
+        }
         Write-Host ''
     }
 }
